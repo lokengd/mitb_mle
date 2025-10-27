@@ -8,7 +8,6 @@ from pyspark.sql import functions as F
 import pandas as pd
 import numpy as np
 from sklearn.metrics import roc_auc_score, log_loss, accuracy_score, precision_score, recall_score, f1_score, mean_absolute_error, mean_squared_error
-import matplotlib.pyplot as plt
 
 def _compute_auc(y_true: np.ndarray, y_pred: np.ndarray):
     try:
@@ -26,50 +25,6 @@ def _compute_logloss(y_true: np.ndarray, y_pred: np.ndarray):
         return float(log_loss(y_true, y_pred))
     except Exception:
         return None
-
-def _make_bins(pdf, col: str, q: int = 10):
-    """
-        Add quantile bins [0..q-1] for a score column.
-    """
-    # handle constant columns by adding jitter to allow qcut
-    s = pdf[col]
-    if s.nunique() == 1:
-        s = s + np.random.normal(0, 1e-9, size=len(s))
-    pdf = pdf.copy()
-    pdf["score_bin"] = pd.qcut(s, q=q, labels=False, duplicates="drop")
-    return pdf
-
-def lift_table(pdf, bins: int = 10):
-    """
-        Compute decile lift (higher score = higher risk).
-    """
-    tmp = _make_bins(pdf[["model_predictions", "label"]].copy(), "model_predictions", q=bins)
-    g = tmp.groupby("score_bin")
-    out = g.agg(
-        n=("score_bin", "size"),
-        bad_rate=("label", "mean"),
-        avg_score=("model_predictions", "mean"),
-    ).reset_index()
-    out = out.sort_values("score_bin", ascending=False).reset_index(drop=True)
-    out["cum_n"] = out["n"].cumsum()
-    overall_bad_rate = tmp["label"].mean() if len(tmp) else np.nan
-    out["lift"] = out["bad_rate"] / overall_bad_rate if overall_bad_rate and not np.isnan(overall_bad_rate) else np.nan
-    return out
-
-def calibration_table(pdf, bins: int = 10):
-    """
-        Bin by score and compare avg predicted vs. observed.
-    """
-    tmp = _make_bins(pdf[["model_predictions", "label"]].copy(), "model_predictions", q=bins)
-    g = tmp.groupby("score_bin")
-    out = g.agg(
-        avg_pred=("model_predictions", "mean"),
-        avg_obs=("label", "mean"),
-        count=("label", "size"),
-    ).reset_index()
-    out = out.sort_values("score_bin").reset_index(drop=True)
-    out["calibration_error"] = (out["avg_pred"] - out["avg_obs"]).abs()
-    return out
 
 def compute_metrics(sdf) -> dict:
     n_rows = sdf.count()
@@ -93,10 +48,6 @@ def compute_metrics(sdf) -> dict:
     mae = mean_absolute_error(y, p)   # compare probabilities vs labels
     mse = mean_squared_error(y, p)
 
-    # optional: lift / calibration 
-    lift = lift_table(pdf, bins=10)
-    calib = calibration_table(pdf, bins=10)
-
     metrics = {
         "auc": auc,
         "gini": float(gini) if gini is not None else None,
@@ -110,8 +61,6 @@ def compute_metrics(sdf) -> dict:
         "n_rows": n_rows,
         "n_pos": int(n_pos),
         "n_neg": int(n_neg),
-        "lift_table": lift,
-        "calibration_table": calib,
     }
     print("Computed metrics:", metrics)
     return metrics
@@ -217,10 +166,6 @@ def main():
     snapshot_date_str = args.snapshot_date
     scalars = {k: v for k, v in metrics.items() if not isinstance(v, pd.DataFrame)}
     pd.DataFrame([{"metric": k, "value": v} for k, v in scalars.items()]).to_parquet(str(out_dir / f"{args.model_name}_metrics_{snapshot_date_str.replace('-', '_')}.parquet"), index=False)
-
-    # Store tables as parquet
-    metrics["lift_table"].to_parquet(out_dir / f"{args.model_name}_lift_table_{snapshot_date_str.replace('-', '_')}.parquet", index=False)
-    metrics["calibration_table"].to_parquet(out_dir / f"{args.model_name}_calibration_table_{snapshot_date_str.replace('-', '_')}.parquet", index=False)
 
     # -------------------------
     # Append to history

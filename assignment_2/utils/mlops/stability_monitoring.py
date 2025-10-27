@@ -14,7 +14,6 @@ def _read_table(path: Path) -> pd.DataFrame:
         return pd.read_csv(path)
     raise ValueError(f"Unsupported file type: {path}")
 
-
 def _ensure_bins_from_reference(ref: pd.Series, nbins: int = 10) -> np.ndarray:
     qs = np.linspace(0, 1, nbins + 1)
     edges = np.quantile(ref.dropna().values, qs)
@@ -28,7 +27,6 @@ def _ensure_bins_from_reference(ref: pd.Series, nbins: int = 10) -> np.ndarray:
         edges = np.linspace(vmin, vmax, nbins + 1)
     return edges
 
-
 def _proportions_in_bins(values: pd.Series, edges: np.ndarray) -> np.ndarray:
     """Return proportion in each bin defined by edges (right-open except last)"""
     # pd.cut ensures last bin includes the max
@@ -37,7 +35,6 @@ def _proportions_in_bins(values: pd.Series, edges: np.ndarray) -> np.ndarray:
     if counts.sum() == 0:
         return np.zeros(len(counts))
     return (counts / counts.sum()).values
-
 
 def psi_from_props(p: np.ndarray, q: np.ndarray, eps: float = 1e-10) -> float:
     """
@@ -164,50 +161,9 @@ def main():
     psi_history.to_csv(csv_file, index=False)
     print(f"PSI updated: {psi_file}, {csv_file}")
 
-    # -------------------------
-    # Visualization
-    # -------------------------
-    # TODO Add shaded spans for TRAIN/OOT/PROD bands, the plotting routine to fill regions where period_tag == 'TRAIN' etc
-
     if psi_history is not None and len(psi_history["month"].unique()) > 1: # have history -> time-series per feature + top-k panel
         psi_timeseries = psi_history.sort_values(["feature", "month"])  # ensure order
-
-        # per-feature line charts
-        for feature, g in psi_timeseries.groupby("feature"):
-            plt.figure()
-            plt.plot(g["month"], g["psi"], marker="o")
-            plt.xticks(rotation=45, ha="right")
-            plt.axhline(0.1, linestyle="--")   # warn
-            plt.axhline(0.25, linestyle="--")  # action
-            plt.title(f"PSI over time — {feature}")
-            plt.ylabel("PSI")
-            plt.tight_layout()
-            feature_png = str(out_dir / f"{args.model_name}_psi_{feature}.png")
-            plt.savefig(feature_png)
-            print(f"PSI per feature updated: {feature_png}")
-            plt.close()
-
-        # top-k drifting features panel
-        topk_feats = (
-            psi_timeseries.groupby("feature")["psi"].max().sort_values(ascending=False).head(6).index
-        )
-        panel = psi_timeseries[psi_timeseries["feature"].isin(topk_feats)]
-        plt.figure()
-        for feature, g in panel.groupby("feature"):
-            plt.plot(g["month"], g["psi"], marker="o", label=feature)
-        plt.xticks(rotation=45, ha="right")
-        plt.axhline(0.1, linestyle="--")
-        plt.axhline(0.25, linestyle="--")
-        plt.legend()
-        plt.title("PSI over time — top drifting features")
-        plt.ylabel("PSI")
-        plt.tight_layout()
-        top_features_png = str(out_dir / f"{args.model_name}_psi_top_features.png")
-        plt.savefig(top_features_png)
-        plt.close()
-        print(f"PSI top-k drifting features updated: {top_features_png}")
-
-        # summary table across history
+        # create summary table across history
         summary = (
             psi_timeseries.groupby("feature")
             .agg(max_psi=("psi", "max"), mean_psi=("psi", "mean"), n_months=("month", "nunique"))

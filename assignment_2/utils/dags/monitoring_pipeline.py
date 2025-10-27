@@ -8,6 +8,7 @@ from airflow.operators.bash import BashOperator
 from airflow.sensors.filesystem import FileSensor
 from airflow.utils.task_group import TaskGroup
 from airflow.operators.dummy import DummyOperator
+from airflow.models.baseoperator import cross_downstream
 
 from scripts.config import FEATURE_STORE, MONITOR_STORE, PRED_STORE, LABEL_STORE
 
@@ -117,7 +118,25 @@ with DAG(
     # --------------------------------------------
     # 4. Visualization
     # --------------------------------------------
-    monitoring_visualization = DummyOperator(task_id="monitoring_visualization")
+    monitoring_charts = []
+    for model in dag.params["models"]: 
+        with TaskGroup(group_id=f"{model}_charting", tooltip=f"Visualization: create monitoring charts for {model}") as g:
+            psi_charting = BashOperator(
+                task_id=f"{model}_psi_charts",
+                bash_command=f"""
+                    python /opt/airflow/scripts/mlops/visualization.py \
+                    --snapshot-date "{{{{ds}}}}" \
+                    --model-name "{model}" \
+                    --psi-file {{{{params.monitor_store}}}}stability/{model}/{model}_psi.parquet \
+                    --out-dir {{{{params.monitor_store}}}}charts \
+                    """.strip(),               
+                execution_timeout=timedelta(hours=1),
+            )
+        
+            [psi_charting]
+        
+        monitoring_charts.append(g)
+
 
     # -------------------------------------------------
     # 5. End task
@@ -125,5 +144,15 @@ with DAG(
     monitoring_completed = DummyOperator(task_id="monitoring_completed")
 
 
-    # Dependencies
-    monitoring_start >> check_labels >> models_monitoring >> monitoring_visualization >> monitoring_completed
+    # a) Chain the single tasks
+    monitoring_start >> check_labels
+
+    # b) Fan out from check_labels to every monitoring task
+    check_labels >> models_monitoring  # task >> [list] is allowed
+
+    # c) Connect every monitoring task to every chart task
+    cross_downstream(models_monitoring, monitoring_charts)  # [list] -> [list]
+
+    # d) Fan in each chart to the final completion task
+    for chart in monitoring_charts:
+        chart >> monitoring_completed  # [list] >> task (via loop)
