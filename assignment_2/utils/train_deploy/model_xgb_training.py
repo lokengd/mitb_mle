@@ -24,8 +24,7 @@ from sklearn.metrics import make_scorer, f1_score, roc_auc_score
 from sklearn.datasets import make_classification
 from sklearn.model_selection import train_test_split
 
-# Paths inside Airflow container (mounted via docker-compose)
-from mlops.etl import load_gold_features_date_range, load_gold_primary_labels
+from train_deploy.etl import load_gold_features_date_range, load_gold_primary_labels
 
 
 def main():

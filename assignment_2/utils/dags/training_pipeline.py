@@ -86,7 +86,7 @@ with DAG(
         train_model = BashOperator(
             task_id=f"{model}_training",
             bash_command=f"""
-                python /opt/airflow/scripts/mlops/{model}_training.py \
+                python /opt/airflow/scripts/train_deploy/{model}_training.py \
                 --snapshot-date "{{{{ds}}}}" \
                 --out-dir "{{{{params.model_bank}}}}" \
                 """.strip(),       

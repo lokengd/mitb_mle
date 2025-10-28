@@ -16,8 +16,7 @@ from sklearn.preprocessing import StandardScaler
 from sklearn.metrics import make_scorer, roc_auc_score
 from sklearn.linear_model import LogisticRegression
 
-# Your ETL helpers
-from mlops.etl import load_gold_features_date_range, load_gold_primary_labels
+from train_deploy.etl import load_gold_features_date_range, load_gold_primary_labels
 
 
 def main():

@@ -11,7 +11,7 @@ import pyspark.sql.functions as F
 import pandas as pd 
 import numpy as np
 
-from mlops.etl import load_gold_features_snapshot
+from train_deploy.etl import load_gold_features_snapshot
 
 def main():
 
