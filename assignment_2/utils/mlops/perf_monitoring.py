@@ -4,6 +4,7 @@ import os
 from pathlib import Path
 import pyspark
 from pyspark.sql import functions as F
+from datetime import datetime
 
 import pandas as pd
 import numpy as np
@@ -26,70 +27,92 @@ def _compute_logloss(y_true: np.ndarray, y_pred: np.ndarray):
     except Exception:
         return None
 
-def compute_metrics(sdf) -> dict:
+def compute_metrics(sdf, labels_available=False) -> dict:
     n_rows = sdf.count()
-    n_pos = sdf.agg(F.sum("label")).collect()[0][0]
-    n_neg = n_rows - n_pos
+    metrics = {"n_rows": sdf.count()}
+    # always-available score stats, not require label
+    stats = sdf.select(
+        F.mean("model_predictions").alias("score_mean"),
+        F.stddev("model_predictions").alias("score_std"),
+        F.expr("percentile_approx(model_predictions, 0.5)").alias("score_median")
+    ).collect()[0].asDict()
+    metrics.update(stats)
 
-    pdf = sdf.select("label", "model_predictions").toPandas()
-    y = pdf["label"].astype(int).values
-    p = pdf["model_predictions"].astype(float).values
-    y_hat = (p >= 0.5).astype(int) # threshold at 0.5, label predictions
+    if labels_available:
+        # Supervised metrics (need labels)
+        n_pos = sdf.agg(F.sum("label")).collect()[0][0]
+        n_neg = n_rows - n_pos
 
-    auc = _compute_auc(y, p)
-    gini = (2 * auc - 1) if auc is not None else None
-    logloss = _compute_logloss(y, p)
-    
-    accuracy = accuracy_score(y, y_hat)
-    precision = precision_score(y, y_hat, zero_division=0)
-    recall = recall_score(y, y_hat, zero_division=0)
-    f1 = f1_score(y, y_hat, zero_division=0)
+        pdf = sdf.select("label", "model_predictions").toPandas()
+        y = pdf["label"].astype(int).values
+        p = pdf["model_predictions"].astype(float).values
+        y_hat = (p >= 0.5).astype(int) # threshold at 0.5, label predictions
 
-    mae = mean_absolute_error(y, p)   # compare probabilities vs labels
-    mse = mean_squared_error(y, p)
+        auc = _compute_auc(y, p)
+        gini = (2 * auc - 1) if auc is not None else None
+        logloss = _compute_logloss(y, p)
+        
+        accuracy = accuracy_score(y, y_hat)
+        # precision = precision_score(y, y_hat, zero_division=0)
+        # recall = recall_score(y, y_hat, zero_division=0)
+        # f1 = f1_score(y, y_hat, zero_division=0)
 
-    metrics = {
-        "auc": auc,
-        "gini": float(gini) if gini is not None else None,
-        "logloss": logloss,
-        "accuracy": accuracy,
-        "precision": precision,
-        "recall": recall,
-        "f1_score": f1,
-        "mae": mae,
-        "mse": mse,
-        "n_rows": n_rows,
-        "n_pos": int(n_pos),
-        "n_neg": int(n_neg),
-    }
+        # mae = mean_absolute_error(y, p)   # compare probabilities vs labels
+        # mse = mean_squared_error(y, p)
+
+        metrics.update({
+            "n_pos": int(n_pos),
+            "prevalence": (n_pos / n_rows) if n_rows else None,
+            "n_neg": int(n_neg),
+            "auc": auc,
+            "gini": float(gini) if gini is not None else None,
+            "logloss": logloss,
+            "accuracy": accuracy,
+            # "precision": precision,
+            # "recall": recall,
+            # "f1_score": f1,
+            # "mae": mae,
+            # "mse": mse,
+        })
+
     print("Computed metrics:", metrics)
     return metrics
 
 def join_table_inner(spark, pred_path, label_path):
+    labels_available = False
     if not os.path.exists(pred_path):
         raise FileNotFoundError(f"Predictions file not found: {pred_path}")
-    if not os.path.exists(label_path):
-        raise FileNotFoundError(f"Labels file not found: {label_path}")
+    
+    sdf  = spark.read.parquet(pred_path)
 
-    preds  = spark.read.parquet(pred_path)
-    labels = spark.read.parquet(label_path).select("Customer_ID", "snapshot_date", "label")
+    if os.path.exists(label_path):
+         # rename to label_date so that it does not clash with snapshot_date in sdf
+        labels = spark.read.parquet(label_path).select("Customer_ID", "snapshot_date", "label").withColumnRenamed("snapshot_date","label_date")
 
-    # Inner join on customer + snapshot date
-    sdf = preds.join(labels, on=["Customer_ID", "snapshot_date"], how="inner")
-    row_count = sdf.count()
+        # Inner join on customer only
+        joined_sdf = sdf.join(labels, on=["Customer_ID"], how="inner")
+        # Inner join on customer + snapshot date
+        # sdf = sdf.join(labels, on=["Customer_ID", "snapshot_date"], how="inner")
+        row_count = joined_sdf.count()
 
-    print("Joined table count:", row_count)
-    sdf.show(10, truncate=False)
-    if row_count == 0:
-        raise ValueError("Joined table has no records.")
+        print("Joined table count:", row_count)
+        joined_sdf.show(10, truncate=False)
+        if row_count == 0:
+            labels_available = False
+            print("Joined table has no records, set labels_available=False")
+        else:
+            print("Joined table has records, set labels_available=True")
+            labels_available = True
+            sdf = joined_sdf
 
-    return sdf
+
+    return sdf, labels_available
 
 def _append_to_history(history_path, model_name, snapshot_date_str, period_tag, scalars):
     """Append one row to a tidy Parquet history, creating it if missing."""
     row = {
         "model_name": model_name,
-        "snapshot_date": pd.to_datetime(snapshot_date_str),
+        "snapshot_date": snapshot_date_str,
         "period_tag": period_tag,
         "auc": scalars.get("auc"),
         "logloss": scalars.get("logloss"),
@@ -152,12 +175,12 @@ def main():
     # -------------------------
     # Load joined table
     # -------------------------
-    sdf = join_table_inner(spark, pred_path=args.pred_file, label_path=args.label_file)
+    sdf, labels_available = join_table_inner(spark, pred_path=args.pred_file, label_path=args.label_file)
 
     # -------------------------
     # Compute metrics
     # -------------------------
-    metrics = compute_metrics(sdf)
+    metrics = compute_metrics(sdf, labels_available)
 
     # -------------------------
     # Persist artifacts
@@ -173,7 +196,7 @@ def main():
     if args.history_file:
         # keep only scalar metrics for the row
         scalars = {k: v for k, v in metrics.items() if not isinstance(v, pd.DataFrame)}
-        _append_to_history(args.history_file, args.model_name, snapshot_date_str,args.period_tag, scalars)
+        _append_to_history(args.history_file, args.model_name, snapshot_date_str, args.period_tag, scalars)
         
 
 if __name__ == "__main__":

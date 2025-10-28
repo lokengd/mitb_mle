@@ -45,28 +45,26 @@ def psi_from_props(p: np.ndarray, q: np.ndarray, eps: float = 1e-10) -> float:
     q = np.clip(q, eps, 1.0)
     return float(np.sum((p - q) * np.log(p / q)))
 
-
-def psi_for_feature_over_time(
-    ref: pd.Series,
-    timeline: pd.DataFrame,
-    month_col: str,
-    feature_col: str,
-    nbins: int = 10,
-) -> pd.DataFrame:
+def psi_for_feature_over_time(ref_series, timeline: pd.DataFrame, month_col, feature_col, model_name, type) -> pd.DataFrame:
     """
-    Compute PSI(feature) for each month in `timeline`.
-    `timeline` must have columns [month_col, feature_col].
+    Compute PSI(feature) for each month in `timeline` which must have columns [month_col, feature_col].
     """
-    edges = _ensure_bins_from_reference(ref, nbins=nbins)
-    ref_props = _proportions_in_bins(ref, edges)
+    edges = _ensure_bins_from_reference(ref_series, nbins=10) # nbins = 10 default
+    ref_props = _proportions_in_bins(ref_series, edges)
 
     out = []
     for m, g in timeline.groupby(month_col, sort=True):
         comp_props = _proportions_in_bins(g[feature_col], edges)
         psi = psi_from_props(comp_props, ref_props)
-        out.append({"month": m, "feature": feature_col, "psi": psi, "n": int(len(g))})
+        out.append({
+            "model_name": model_name,
+            "type": type,
+            "month": m, 
+            "feature": feature_col, 
+            "psi": psi, 
+            "n": int(len(g)),
+        })
     return pd.DataFrame(out).sort_values("month")
-
 
 def build_month_str(dt: pd.Series) -> pd.Series:
     """return: YYYY-MM month key"""
@@ -76,9 +74,12 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--snapshot-date", required=True, type=str)
     parser.add_argument("--model-name", required=True, type=str)
-    parser.add_argument("--reference", required=True, nargs="+", help="Paths to reference datasets, e.g. --reference ref1.parquet ref2.parquet")
-    parser.add_argument("--current", required=True, help="Paths to current month datasets")
+    parser.add_argument("--ref-features", required=True, nargs="+", help="Paths to reference datasets, e.g. --ref-features ref1.parquet ref2.parquet")
+    parser.add_argument("--cur-features", required=True, help="Current month file (csv/parquet).")
     parser.add_argument("--features", required=True, nargs="+", help="Feature columns to compute PSI for, e.g. --features fe_1 fe_2 fe_3")
+    parser.add_argument("--ref-pred", required=True, nargs="+", help="Paths to prediction datasets, e.g. --ref-scores ref1.parquet ref2.parquet")
+    parser.add_argument("--cur-pred", required=True, help="Current month file (csv/parquet).")
+    parser.add_argument("--pred-col", required=True, default="model_predictions", help="column storing model predictions based on output of batch_inference.py")
     parser.add_argument("--out-dir", required=True, help="Output directory")
     args = parser.parse_args()
     print("Arguments:", args)
@@ -105,76 +106,105 @@ def main():
     # -------------------------
     # Load reference and current datasets
     # -------------------------
-    ref_frames = []
-    for rp in args.reference:   
-        df = _read_table(Path(rp)).copy()
-        ref_frames.append(df)
-    ref = pd.concat(ref_frames, ignore_index=True)
-    cur = _read_table(Path(args.current)).copy()
-
-    # tag current month (YYYY_MM) 
-    cur["__month__"] = build_month_str(cur["snapshot_date"])
+    def load_ref_current_dataset(refs, current):
+        ref_frames = []
+        for r in refs:   
+            df = _read_table(Path(r)).copy()
+            ref_frames.append(df)
+        ref = pd.concat(ref_frames, ignore_index=True)
+        cur = _read_table(Path(current)).copy()
+        return ref, cur
+    
+    ref_pred, cur_pred = load_ref_current_dataset(args.ref_pred, args.cur_pred)
+    cur_pred["__month__"] = build_month_str(cur_pred["snapshot_date"]) # Derive month key for current (used in outputs) (YYYY_MM) 
+    ref_features, cur_features = load_ref_current_dataset(args.ref_features, args.cur_features)
+    cur_features["__month__"] = build_month_str(cur_features["snapshot_date"]) # Derive month key for current (used in outputs) (YYYY_MM) 
+    
+    # -------------------------
+    # PSI (scores)
+    # -------------------------
+    pred_col = args.pred_col
+    ref_series = pd.to_numeric(ref_pred[pred_col], errors="coerce")
+    pred_timeline = cur_pred[["__month__", pred_col]].copy()
+    pred_timeline[pred_col] = pd.to_numeric(pred_timeline[pred_col], errors="coerce")
+    
+    psi_df = psi_for_feature_over_time(
+            ref_series=ref_series,
+            timeline=pred_timeline,
+            month_col="__month__",
+            feature_col=pred_col, 
+            model_name=args.model_name,
+            type="PSI"
+        )
+    # print("psi_df.shape", psi_df.shape)    
+    # print(psi_df.info())  
 
     # -------------------------
-    # Compute PSI per feature for current month
+    # CSI (features)
     # -------------------------
-    rows = []
+    csi_rows = []
     for feature in args.features:
 
-        ref_series = pd.to_numeric(ref[feature], errors="coerce")
+        ref_series = pd.to_numeric(ref_features[feature], errors="coerce")
 
-        timeline = cur[["__month__", feature]].copy()
-        timeline[feature] = pd.to_numeric(timeline[feature], errors="coerce")
-        timeline = timeline.rename(columns={feature: "value"})
+        feature_timeline = cur_features[["__month__", feature]].copy()
+        feature_timeline[feature] = pd.to_numeric(feature_timeline[feature], errors="coerce")
+        feature_timeline = feature_timeline.rename(columns={feature: "value"})
 
-        # this helper returns a DataFrame with at least ['month','psi'] rows
-        feature_psi = psi_for_feature_over_time(
-            ref=ref_series,
-            timeline=timeline,
+        feature_csi = psi_for_feature_over_time(
+            ref_series=ref_series,
+            timeline=feature_timeline,
             month_col="__month__",
             feature_col="value",
-            nbins=10, # default
+            model_name=args.model_name,
+            type="CSI"
         )
-        feature_psi["feature"] = feature
-        rows.append(feature_psi)
+        feature_csi["feature"] = feature
+        csi_rows.append(feature_csi)
 
-    if not rows:
-        raise SystemExit("No PSI computed (no valid features present in both datasets).")
+    if not csi_rows:
+        raise SystemExit("No CSI computed (no valid features present in both datasets).")
 
-    psi_df = pd.concat(rows, ignore_index=True).sort_values(["feature", "month"])
-    psi_df["model_name"] = args.model_name # add model name to track
+    csi_df = pd.concat(csi_rows, ignore_index=True).sort_values(["feature", "month"])
+    # print("csi_df.shape", csi_df.shape)    
+    # print(csi_df.info())  
 
     # -------------------------
     # Persist artifacts (across time periods)
     # -------------------------
-    psi_file = os.path.join(out_dir, f"{args.model_name}_psi.parquet")
-    if os.path.exists(psi_file):
-        psi_history = pd.read_parquet(psi_file)
-        psi_history = pd.concat([psi_history, psi_df], ignore_index=True)
-        # drop dupes if the same feature-month is re-run
-        psi_history = psi_history.drop_duplicates(subset=["model_name","feature", "month"], keep="last")
-    else:
-        psi_history = psi_df
+    def append_history(hist_path, new_df: pd.DataFrame):
+        print(f"append_history... {hist_path}")
+        if os.path.exists(hist_path):
+            hist_sdf = pd.read_parquet(hist_path)
+            hist_sdf = pd.concat([hist_sdf, new_df], ignore_index=True)
+        else:
+            hist_sdf = new_df.copy()
+        # keep last by (month, feature, type, model_name)
+        hist_sdf = (hist_sdf.sort_values(["month"])).drop_duplicates(subset=["model_name", "type", "feature", "month"], keep="last")
+        hist_sdf.to_parquet(hist_path, index=False)
+        csv_path = hist_path.replace(".parquet", ".csv") # keep a CSV copy side-by-side for debugging 
+        hist_sdf.to_csv(csv_path, index=False)
+        print(f"Appended history: {hist_path}, {csv_path}")
+        return hist_sdf
     
-    psi_history.to_parquet(psi_file, index=False)
-    csv_file = str(psi_file).replace(".parquet", ".csv") # keep a CSV copy side-by-side for debugging 
-    psi_history.to_csv(csv_file, index=False)
-    print(f"PSI updated: {psi_file}, {csv_file}")
-
-    if psi_history is not None and len(psi_history["month"].unique()) > 1: # have history -> time-series per feature + top-k panel
-        psi_timeseries = psi_history.sort_values(["feature", "month"])  # ensure order
-        # create summary table across history
+    common_hist_path = os.path.join(out_dir, f"{args.model_name}_stability_history.parquet")
+    psi_hist = append_history(common_hist_path, psi_df)
+    csi_hist = append_history(common_hist_path, csi_df)
+ 
+    if csi_hist is not None and len(csi_hist["month"].unique()) > 1: 
+        csi_timeseries = csi_hist.sort_values(["feature", "month"])  # ensure order
+        # create stats summary table across history
         summary = (
-            psi_timeseries.groupby("feature")
+            csi_timeseries.groupby("feature")
             .agg(max_psi=("psi", "max"), mean_psi=("psi", "mean"), n_months=("month", "nunique"))
             .reset_index()
             .sort_values("max_psi", ascending=False)
         )
-        summary_file = str(out_dir / f"{args.model_name}_psi_summary_{snapshot_date_str.replace('-', '_')}.csv")
+        summary_file = str(out_dir / f"{args.model_name}_stats_summary_{snapshot_date_str.replace('-', '_')}.csv")
         summary.to_csv(summary_file, index=False)
-        print(f"PSI summary: {summary_file}")    
+        print(f"Stability stats summary: {summary_file}")    
     else: 
-        print(f"PSI has no history -> less than 2 months")
+        print(f"Skip! Stability stats has no history -> less than 2 months")
 
 
 
