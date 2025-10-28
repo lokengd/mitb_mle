@@ -218,7 +218,7 @@ def main():
     # -------------------------------
     # Prepare model artefact to save 
     # -------------------------------
-    model_name = "model_xgboost"
+    model_name = "model_xgb"
     model_artefact = {}
     model_artefact['model'] = best_model
     model_artefact['model_version'] = f"{model_name}_"+config["model_train_date_str"].replace('-','_')

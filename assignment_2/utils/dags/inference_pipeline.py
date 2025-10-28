@@ -9,7 +9,7 @@ from airflow.sensors.filesystem import FileSensor
 from airflow.utils.task_group import TaskGroup
 from airflow.operators.dummy import DummyOperator
 
-from scripts.config import FEATURE_STORE, MODEL_BANK, PRED_STORE
+from scripts.config import PRED_STORE, DEPLOYMENT_DIR
 
 # Default arguments for all tasks
 DAG_ID="inference_pipeline"
@@ -34,10 +34,9 @@ with DAG(
     catchup=True,  # True to create one DAG run per schedule interval from start_date up to “now” (or end_date if set). That’s backfilling historical runs automatically.
     max_active_runs=1, # only one active run at a time
     params={
-        "models": ["model_xgboost"],
-        "feature_store": FEATURE_STORE,
-        "model_bank": MODEL_BANK,
+        "model_name": "prod_model",
         "pred_store": PRED_STORE,
+        "deployment_dir": DEPLOYMENT_DIR,
         "period_tag": "PROD", # "TRAIN | VAL | TEST | OOT | PROD"
     },
     tags=["batch_inference","online_inference"],
@@ -49,47 +48,43 @@ with DAG(
     batch_inference_start = DummyOperator(task_id="batch_inference_start")
 
     # --------------------------------------------------
-    # 2. Inference each model in parallel
+    # 2. Inference production model
     # --------------------------------------------------
-    models_batch_inference = []
-    for model in dag.params["models"]: 
-        
-        with TaskGroup(group_id=f"{model}_batch_inference", tooltip=f"Batch inference for {model}") as g:
+    with TaskGroup(group_id="batch_inference", tooltip=f"Batch inference for production model") as batch_inference:
 
-            # -------------------------------------------------
-            # 2.1. Check dependencies: model file exists
-            # -------------------------------------------------
-            check_model = FileSensor(
-                task_id=f"check_{model}",
-                fs_conn_id="fs_default",     # Filesystem connection pointing to "/" or "/opt/airflow"
-                filepath=f"""{{{{params.model_bank}}}}{model}_{{{{ds | replace('-', '_')}}}}.pkl""".strip(),
-                poke_interval=60,            # check every 30 seconds -  how frequently to check
-                timeout=60 * 60,             # 1h timeout max waiting time
-                mode="reschedule",           # free up worker slots between pokes
-            )
-            
-            # -------------------------------------------------
-            # 2.2. Batch inference tasks
-            # -------------------------------------------------
-            infer_model = BashOperator(
-                task_id=f"infer_{model}",
-                bash_command=f"""
-                    python /opt/airflow/scripts/mlops/batch_inference.py \
-                    --snapshot-date "{{{{ds}}}}" \
-                    --model-name "{model}" \
-                    --model-bank-dir "{{{{params.model_bank}}}}" \
-                    --out-dir "{{{{params.pred_store}}}}" \
-                    """.strip(),
-                execution_timeout=timedelta(hours=1),
-            )
-
-            check_model >> infer_model
+        # -------------------------------------------------
+        # 2.1. Check dependencies: model file exists
+        # -------------------------------------------------
+        check_model = FileSensor(
+            task_id="check_model",
+            fs_conn_id="fs_default",   
+            filepath=f"""{{{{params.deployment_dir}}}}{{{{params.model_name}}}}.pkl""".strip(),
+            poke_interval=60,           
+            timeout=60 * 60,          
+            mode="reschedule",      
+        )
         
-        models_batch_inference.append(g)
+        # -------------------------------------------------
+        # 2.2. Batch inference tasks
+        # -------------------------------------------------
+        infer_model = BashOperator(
+            task_id="infer_model",
+            bash_command=f"""
+                python /opt/airflow/scripts/mlops/batch_inference.py \
+                --snapshot-date "{{{{ds}}}}" \
+                --model-name "{{{{params.model_name}}}}" \
+                --deployment-dir "{{{{params.deployment_dir}}}}" \
+                --out-dir "{{{{params.pred_store}}}}" \
+                """.strip(),
+            execution_timeout=timedelta(hours=1),
+        )
+
+        check_model >> infer_model
     
+
     # -------------------------------------------------
     # 3. End task
     # -------------------------------------------------
     batch_inference_completed = DummyOperator(task_id="batch_inference_completed")
 
-    batch_inference_start >> models_batch_inference >> batch_inference_completed
+    batch_inference_start >> batch_inference >> batch_inference_completed

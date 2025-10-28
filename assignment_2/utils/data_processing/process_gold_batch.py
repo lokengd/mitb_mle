@@ -192,9 +192,8 @@ def _process_clickstream(spark, df, gold_dir, labeling_rule, partition_data, cod
     df_feature = df # keep all 20 fe_[n] columns
     
     # fe_1 3-month average: fe_1_avg_3m
-    df_feature = _n_months_average(spark, partition_data, df_feature, 'fe_1', 'fe_1_avg_3m', 3)
-    # df_feature = df_feature.drop("fe_1") # do not drop
-
+    # df_feature = _n_months_average(spark, partition_data, df_feature, 'fe_1', 'fe_1_avg_3m', 3)
+    
     # save gold table - IRL connect to database to write
     partition_name = partition_data['partition_name']
     filepath = gold_dir["feature_store_temp"] + partition_name.replace('silver','gold').replace('.csv','.parquet')      

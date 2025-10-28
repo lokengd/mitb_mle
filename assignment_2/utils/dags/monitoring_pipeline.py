@@ -31,7 +31,7 @@ with DAG(
     catchup=True,
     max_active_runs=1,
     params={
-        "models": ["model_xgboost"],
+        "models": ["model_xgb","model_lr"],
         "pred_store": PRED_STORE,
         "label_store": LABEL_STORE,
         "feature_store": FEATURE_STORE,

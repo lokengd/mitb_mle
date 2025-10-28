@@ -45,7 +45,7 @@ with DAG(
     catchup=True,  # True to create one DAG run per schedule interval from start_date up to “now” (or end_date if set). That’s backfilling historical runs automatically.
     max_active_runs=1, # only one active run at a time
     params={
-        "models": ["model_xgboost","model_lr"],
+        "models": ["model_xgb","model_lr"],
         "label_store": LABEL_STORE,
         "feature_store": FEATURE_STORE,
         "model_bank": MODEL_BANK,

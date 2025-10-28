@@ -1,38 +1,24 @@
 import argparse
 import os
-import glob
 from pathlib import Path
-import pandas as pd
 import pickle
-import matplotlib.pyplot as plt
-import numpy as np
 import random
 from datetime import datetime, timedelta
 from dateutil.relativedelta import relativedelta
 import pprint
 import pyspark
 import pyspark.sql.functions as F
-
-from pyspark.sql.functions import col
-from pyspark.sql.types import StringType, IntegerType, FloatType, DateType
-
-from sklearn.model_selection import train_test_split
-from sklearn.preprocessing import StandardScaler
-
-import xgboost as xgb
-from sklearn.model_selection import RandomizedSearchCV
-from sklearn.metrics import make_scorer, f1_score, roc_auc_score
-from sklearn.datasets import make_classification
-from sklearn.model_selection import train_test_split
+import pandas as pd 
+import numpy as np
 
 from mlops.etl import load_gold_features_snapshot
 
 def main():
 
     parser = argparse.ArgumentParser(description="run job")
-    parser.add_argument("--snapshot-date", type=str, required=True, help="YYYY-MM-DD")
-    parser.add_argument("--model-name", type=str, required=True, help="Model filename, e.g. model_xgboost_2024_09_01.pkl")
-    parser.add_argument("--model-bank-dir", type=str, required=True, help="Directory path to model bank")
+    parser.add_argument("--snapshot-date", type=str, required=True, help="YYYY-MM-DD, aka the batch date")
+    parser.add_argument("--model-name", type=str, default="prod_model.pkl", help="The production model used for inference")
+    parser.add_argument("--deployment-dir", type=str, required=True, help="Directory path to retrieve the prod model")
     parser.add_argument("--out-dir", type=str, required=True, help="Output directory path to save predictions")
     
     args = parser.parse_args()
@@ -63,13 +49,13 @@ def main():
     config = {}
     config["snapshot_date_str"] = args.snapshot_date
     config["snapshot_date"] = datetime.strptime(config["snapshot_date_str"], "%Y-%m-%d")
-    config["model_name"] = f"{args.model_name}_{config['snapshot_date_str'].replace('-','_')}.pkl"
-    config["model_bank_directory"] = args.model_bank_dir
-    config["model_artefact_filepath"] = config["model_bank_directory"] + config["model_name"]
+    # config["model_name"] = f"{args.model_name}_{config['snapshot_date_str'].replace('-','_')}.pkl"
+    config["model_name"] = f"{args.model_name}.pkl"
+    config["deployment_directory"] = args.deployment_dir
+    config["model_artefact_filepath"] = config["deployment_directory"] + config["model_name"]
     
     pprint.pprint(config)
     
-
     # ------------------------------------
     # Load model artefact from model bank
     # ------------------------------------
@@ -90,13 +76,19 @@ def main():
     # -----------------------------
     # Preprocess data for modeling
     # -----------------------------
-    # extract feature columns for modeling
+    # keep only the IDs and fe_ columns
     feature_cols = [fe_col for fe_col in features_pdf.columns if fe_col.startswith('fe_') and fe_col != "fe_1_avg_3m"]
-    print("feature_cols:", feature_cols)
+    # print("feature_cols:", feature_cols)
+    features_pdf = features_pdf[["Customer_ID","snapshot_date"] + feature_cols]
+    # drop rows with no usable features at all , as logistic regression does not allow null/na values
+    features_pdf = features_pdf.dropna(subset=feature_cols, how="all")
+    # print("features_pdf Shape:")
+    # print(features_pdf.shape)          # shape
+    # print(features_pdf.info())            # column dtypes + non-null counts
 
     # prepare X_inference
     X_inference = features_pdf[feature_cols]
-    
+
     # apply transformer - standard scaler
     transformer_stdscaler = model_artefact["preprocessing_transformers"]["stdscaler"]
     X_inference = transformer_stdscaler.transform(X_inference)
@@ -133,8 +125,6 @@ def main():
     
     # --- end spark session --- 
     spark.stop()
-    
-    print('\n\n---completed job---\n\n')
 
 
 if __name__ == "__main__":
