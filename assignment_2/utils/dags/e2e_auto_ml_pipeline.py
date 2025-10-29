@@ -1,7 +1,6 @@
 import os
 from datetime import timedelta
 import pendulum
-import glob
 from dateutil.relativedelta import relativedelta
 
 from airflow import DAG
@@ -48,10 +47,13 @@ def _check_datasets_exist(ds_date, required_months=14):
 
     return all_ok
 
-def should_train(required_months=14, last_allowed="2024-09-01", **context):
+def should_train(**context):
     """
     Return True only if *every* required_months has both the feature and label parquet present.
     """
+    params = context["params"]
+    required_months = params['datasets']['train_total_months']
+    last_allowed = params['datasets']['train_last_allowed']
     ds_date = pendulum.parse(context["ds"]).date()
     if ds_date != pendulum.parse(last_allowed).date():
         print("Training not allowed. Expect logical date:", last_allowed)
@@ -59,10 +61,13 @@ def should_train(required_months=14, last_allowed="2024-09-01", **context):
 
     return _check_datasets_exist(ds_date, required_months)
 
-def should_retrain(required_months=14, last_allowed="2024-10-01", **context):
+def should_retrain(**context):
     """
     Return True only if *every* required_months has both the feature and label parquet present.
     """
+    params = context["params"]
+    required_months = params['datasets']['train_oot_months']
+    last_allowed = params['datasets']['retrain_last_allowed']
     ds_date = pendulum.parse(context["ds"]).date()
     if ds_date < pendulum.parse(last_allowed).date():
         print("Retraining not allowed. Expect >= logical date:", last_allowed)
@@ -70,11 +75,13 @@ def should_retrain(required_months=14, last_allowed="2024-10-01", **context):
 
     return _check_datasets_exist(ds_date, required_months)
 
-def should_infer(start_allowed="2024-10-01", **context):
+def should_infer(**context):
     """
     Return True only after start_allowed and has the feature parquet present.
     """
     ds = pendulum.parse(context["ds"]).date()
+    params = context["params"]
+    start_allowed =params['datasets']['infer_start_allowed']
     start_date = pendulum.parse(start_allowed).date()
 
     if ds < start_date:
@@ -119,6 +126,7 @@ with DAG(
         "deployment_dir": DEPLOYMENT_DIR,
         "pred_store": PRED_STORE,
         "monitor_store": MONITOR_STORE,
+        # monitoring
         "ref_windows": ["2024_08_01", "2024_09_01"],   # 2 months OOT data as reference for monitoring
         # For retraining
         "perf_thresholds": {  # performance guardrails (applied when labels exist)
@@ -134,6 +142,14 @@ with DAG(
         "perf_history_path": f"{MONITOR_STORE}performance/performance_history.parquet",
         "stability_history_path": f"{MONITOR_STORE}stability/stability_history.parquet",
         "retrain_deploy_dag_id": "retrain_deploy_pipeline",  # DAG that trains both models + selects + deploys
+        # Controls the range of datasets for training/retraining
+        "datasets": {
+            "train_total_months": 14,
+            "train_oot_months": 2,
+            "train_last_allowed": "2024-09-01",
+            "retrain_last_allowed": "2024-10-01",
+            "infer_start_allowed": "2024-10-01"
+        },
         "period_tag": None, # "TRAIN | TEST | OOT | PROD" or None
     },
     user_defined_macros={"add_months": add_months},
@@ -285,13 +301,8 @@ with DAG(
 
         feature_store_completed = DummyOperator(task_id="feature_store_completed")
 
-    check_data_attributes >> bronze_attributes >> silver_attributes >> gold_datamart >> feature_store_completed 
-    check_data_financials >> bronze_financials >> silver_financials >> gold_datamart >> feature_store_completed 
-    check_data_clickstream >> bronze_clickstream >> silver_clickstream >> gold_datamart >> feature_store_completed 
-    check_data_lms >> bronze_lms >> silver_lms >> gold_datamart >> feature_store_completed 
-
     def _decide_train(**ctx):
-        return "training" if should_train(equired_months=14, last_allowed="2024-09-01", **ctx) else "skip_training"
+        return "training" if should_train(**ctx) else "skip_training"
     
     train_gate = BranchPythonOperator(
         task_id="train_gate", 
@@ -379,8 +390,7 @@ with DAG(
     # ------------------------------
     inference_gate = ShortCircuitOperator(
         task_id="inference_gate",
-        python_callable=should_infer,
-        op_kwargs={"start_allowed": "2024-10-01"},
+        python_callable=should_infer
     )    
 
     with TaskGroup("batch_inference") as batch_inference:        
@@ -637,7 +647,6 @@ with DAG(
         check_retrain_conditions = ShortCircuitOperator(
             task_id="check_retrain_conditions",
             python_callable=should_retrain,
-            op_kwargs={"required_months": 2, "last_allowed": "2024-10-01"},
         )    
 
         models_retraining = []
@@ -667,6 +676,11 @@ with DAG(
         alert_skip_retraining = BashOperator(task_id="alert_skip_retraining", bash_command="echo 'WARN: Skip retraining'")
 
     # Wiring
+    check_data_attributes >> bronze_attributes >> silver_attributes >> gold_datamart >> feature_store_completed 
+    check_data_financials >> bronze_financials >> silver_financials >> gold_datamart >> feature_store_completed 
+    check_data_clickstream >> bronze_clickstream >> silver_clickstream >> gold_datamart >> feature_store_completed 
+    check_data_lms >> bronze_lms >> silver_lms >> gold_datamart >> feature_store_completed 
+
     data_pipeline >> train_gate 
     data_pipeline >> inference_gate >> batch_inference >> monitoring >> retrain_gate
     train_gate >> training 
