@@ -23,17 +23,12 @@ def add_months(ds: str, months: int, fmt: str = "%Y_%m_%d"):
 
 def _ymd(dt): return dt.strftime("%Y_%m_%d")
 
-def should_train(required_months=14, last_allowed="2024-09-01", **context):
+def _check_datasets_exist(ds_date, required_months=14):
     """
     Return True only if *every* required_months has both the feature and label parquet present.
     """
-    ds = pendulum.parse(context["ds"]).date()
-    if ds != pendulum.parse(last_allowed).date():
-        print("Training not allowed. Expect logical date:", last_allowed)
-        return False
-
     months = []
-    cur = (ds - relativedelta(months=1)).replace(day=1) # build month list: ds-1, ds-2, … (14 total), all normalized to day=1
+    cur = (ds_date - relativedelta(months=1)).replace(day=1) # build month list: ds-1, ds-2, … (14 total), all normalized to day=1
     for _ in range(required_months):
         months.append(cur)
         cur = (cur - relativedelta(months=1)).replace(day=1)
@@ -54,6 +49,50 @@ def should_train(required_months=14, last_allowed="2024-09-01", **context):
             all_ok = False
 
     return all_ok
+
+def should_train(required_months=14, last_allowed="2024-09-01", **context):
+    """
+    Return True only if *every* required_months has both the feature and label parquet present.
+    """
+    ds_date = pendulum.parse(context["ds"]).date()
+    if ds_date != pendulum.parse(last_allowed).date():
+        print("Training not allowed. Expect logical date:", last_allowed)
+        return False
+
+    return _check_datasets_exist(ds_date, required_months)
+    # months = []
+    # cur = (ds - relativedelta(months=1)).replace(day=1) # build month list: ds-1, ds-2, … (14 total), all normalized to day=1
+    # for _ in range(required_months):
+    #     months.append(cur)
+    #     cur = (cur - relativedelta(months=1)).replace(day=1)
+    # months = list(reversed(months))  # oldest → newest
+
+    # # check features + labels exist for each month
+    # all_ok = True
+    # for m in months:
+    #     mm = _ymd(m.replace(day=1))
+    #     feature_file = os.path.join(FEATURE_STORE, f"gold_features_{mm}.parquet")
+    #     feature_ok = os.path.exists(feature_file)
+    #     label_file  = os.path.join(LABEL_STORE+"primary",   f"gold_lms_loan_daily_{mm}.parquet")
+    #     label_ok = os.path.exists(label_file)
+
+    #     print(f"Check dataset {mm} -> [{feature_ok}] feature:{feature_file} | [{label_ok}] label:{label_file}")        
+        
+    #     if not (feature_ok and label_ok):
+    #         all_ok = False
+
+    # return all_ok
+
+def should_retrain(required_months=14, last_allowed="2024-10-01", **context):
+    """
+    Return True only if *every* required_months has both the feature and label parquet present.
+    """
+    ds_date = pendulum.parse(context["ds"]).date()
+    if ds_date < pendulum.parse(last_allowed).date():
+        print("Retraining not allowed. Expect >= logical date:", last_allowed)
+        return False
+
+    return _check_datasets_exist(ds_date, required_months)
 
 def should_infer(start_allowed="2024-10-01", **context):
     """
@@ -217,7 +256,7 @@ with DAG(
     )    
 
     # -------- MODELS TRAINING --------
-    with TaskGroup("model_training") as train:
+    with TaskGroup("model_training") as training:
         models_training = []
         for model in dag.params["models"]: 
 
@@ -233,6 +272,11 @@ with DAG(
 
             models_training.append(train_model)
     
+    decide_model_selection = DummyOperator(
+        task_id="decide_model_selection",
+        trigger_rule="none_failed_min_one_success"
+    )
+
     # -------- MODEL SELECTION --------
     with TaskGroup("model_selection") as model_selection:
         # -------------------------------------------------------------------------
@@ -445,7 +489,7 @@ with DAG(
         for chart in monitoring_charts:
             chart >> monitoring_completed  # [list] >> task (via loop)
 
-    # -------- BRANCH: Decide whether to trigger retraining --------
+    # -------- DECISION FOR RETRAINING --------
     def _decide_retrain(**context):
         import pandas as pd
         from pathlib import Path
@@ -510,10 +554,10 @@ with DAG(
                   ("CSI_ALERT" in policy and drift_bad))
 
         msg = "; ".join(reasons) if reasons else "No thresholds breached or no label yet."
-        print(f"Retrain decision: {'retrain' if should else 'skip_retrain'}, reason={msg}")
+        print(f"Retrain decision: {'retraining' if should else 'skip_retraining'}, reason={msg}")
         context["ti"].xcom_push(key="retrain_needed", value=bool(should))
         context["ti"].xcom_push(key="reason", value=msg)
-        return "retrain" if should else "skip_retrain"
+        return "retraining" if should else "skip_retraining"
 
     decide_retrain = BranchPythonOperator(
         task_id="decide_retrain", 
@@ -521,20 +565,43 @@ with DAG(
         provide_context=True  # this is needed to get kwargs
     )
 
-    # --- RETRAIN ---
-    with TaskGroup("retraining") as retraining:
-        trigger_retrain_deploy = TriggerDagRunOperator(
-            task_id="trigger_retrain_deploy",
-            trigger_dag_id="{{ params.retrain_deploy_dag_id }}",
-            execution_date="{{ ds }}",  # TODO?? retrain using same logical month (will compute its own train/val/test/OOT windows)
-            reset_dag_run=True,
-            wait_for_completion=True,
-            poke_interval=60,
-            deferrable=False,
-        )      
+    # --- RETRAINING ---
+    """
+    Sliding window of K months for dataset used for retraining. 
+    Last model trained with L_old, the new retrain uses L_new = L_old + k months. 
+    That brings in k months of new labeled data and drops the oldest k months -> to address drift problem.
 
-    # --- SKIP RETRAIN ---
-    skip_retrain = DummyOperator(task_id="skip_retrain")
+    Perf monitoring:
+    Trigger retraining on production month P. Primary labels mature at P+6M, 
+    so the latest month with labels that can be trained on is L = P - 6M.
+    P_min = 2024-10-01, so L + 6M = 2025-04-01    
+    """    
+    with TaskGroup("retraining") as retraining:
+        retrain_gate = ShortCircuitOperator(
+            task_id="retrain_gate",
+            python_callable=should_retrain,
+            op_kwargs={"required_months": 2, "last_allowed": "2024-10-01"},
+        )    
+
+        models_retraining = []
+        for model in dag.params["models"]: 
+
+            retrain_model = BashOperator(
+                task_id=f"{model}_retraining",
+                bash_command=f"""
+                    python /opt/airflow/scripts/train_deploy/{model}_training.py \
+                    --snapshot-date "{{{{ds}}}}" \
+                    --out-dir "{{{{params.model_bank}}}}" \
+                    """.strip(),       
+                execution_timeout=timedelta(hours=1),
+            )
+
+            models_retraining.append(retrain_model)
+
+        retrain_gate >> models_retraining
+
+    # --- SKIP RETRAINING ---
+    skip_retraining = DummyOperator(task_id="skip_retraining")
 
     # --- ALERT ---
     alert_retraining = BashOperator(task_id="alert_retraining", bash_command="echo 'INFO: Retrain'")
@@ -546,8 +613,9 @@ with DAG(
 
     # Wiring
     start >> data_pipeline 
-    data_pipeline >> train_gate >> train >> model_selection >> best_model_deployment >> end1
+    data_pipeline >> train_gate >> training >> decide_model_selection >> model_selection >> best_model_deployment >> end1
     data_pipeline >> inference_gate >> run_inference >> monitoring >> decide_retrain
-    decide_retrain >> [retraining, skip_retrain]
+    decide_retrain >> [retraining, skip_retraining]
     retraining >> alert_retraining >> end2
-    skip_retrain >> alert_skip_retrain >> end2
+    retraining >> decide_model_selection >> model_selection >> best_model_deployment >> end1
+    skip_retraining >> alert_skip_retrain >> end2
