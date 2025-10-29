@@ -9,10 +9,8 @@ from airflow.utils.task_group import TaskGroup
 from airflow.operators.bash import BashOperator
 from airflow.operators.python import BranchPythonOperator
 from airflow.sensors.filesystem import FileSensor
-from airflow.sensors.python import PythonSensor
 from airflow.operators.dummy import DummyOperator
 from airflow.models.baseoperator import cross_downstream
-from airflow.operators.trigger_dagrun import TriggerDagRunOperator
 from airflow.operators.python import ShortCircuitOperator
 
 from scripts.config import FEATURE_STORE, LABEL_STORE, MODEL_BANK, DEPLOYMENT_DIR, PRED_STORE, MONITOR_STORE, raw_data_file
@@ -60,28 +58,6 @@ def should_train(required_months=14, last_allowed="2024-09-01", **context):
         return False
 
     return _check_datasets_exist(ds_date, required_months)
-    # months = []
-    # cur = (ds - relativedelta(months=1)).replace(day=1) # build month list: ds-1, ds-2, … (14 total), all normalized to day=1
-    # for _ in range(required_months):
-    #     months.append(cur)
-    #     cur = (cur - relativedelta(months=1)).replace(day=1)
-    # months = list(reversed(months))  # oldest → newest
-
-    # # check features + labels exist for each month
-    # all_ok = True
-    # for m in months:
-    #     mm = _ymd(m.replace(day=1))
-    #     feature_file = os.path.join(FEATURE_STORE, f"gold_features_{mm}.parquet")
-    #     feature_ok = os.path.exists(feature_file)
-    #     label_file  = os.path.join(LABEL_STORE+"primary",   f"gold_lms_loan_daily_{mm}.parquet")
-    #     label_ok = os.path.exists(label_file)
-
-    #     print(f"Check dataset {mm} -> [{feature_ok}] feature:{feature_file} | [{label_ok}] label:{label_file}")        
-        
-    #     if not (feature_ok and label_ok):
-    #         all_ok = False
-
-    # return all_ok
 
 def should_retrain(required_months=14, last_allowed="2024-10-01", **context):
     """
@@ -164,10 +140,14 @@ with DAG(
     render_template_as_native_obj=True,       # allows passing list params directly to TriggerDagRunOperator conf
 ) as dag:
 
-    # --- START OF END TO END PIPELINE ---
+    # ------------------------------
+    # START OF E2E PIPELINE
+    # ------------------------------
     start = BashOperator(task_id="start", bash_command="echo 'Start auto-ml end to end pipeline.'")
     
-    # -------- MEDALLION PIPELINE --------
+    # ------------------------------
+    # MEDALLION PIPELINE 
+    # ------------------------------
     with TaskGroup("data_pipeline") as data_pipeline:
         # -------------------------------------------------
         # 1. Check dependencies: Check raw data is available
@@ -249,14 +229,19 @@ with DAG(
 
         data_pipeline_start >> bronze_layer >> silver_layer >> gold_layer >> data_pipeline_completed 
 
-    train_gate = ShortCircuitOperator(
-        task_id="train_gate",
-        python_callable=should_train,
-        op_kwargs={"required_months": 14, "last_allowed": "2024-09-01"},
-    )    
+    def _decide_train(**ctx):
+        return "training" if should_train(equired_months=14, last_allowed="2024-09-01", **ctx) else "skip_training"
+    
+    train_gate = BranchPythonOperator(
+        task_id="train_gate", 
+        python_callable=_decide_train, 
+        provide_context=True
+    )
 
-    # -------- MODELS TRAINING --------
-    with TaskGroup("model_training") as training:
+    # ------------------------------
+    # MODELS TRAINING
+    # ------------------------------
+    with TaskGroup("training") as training:
         models_training = []
         for model in dag.params["models"]: 
 
@@ -271,14 +256,18 @@ with DAG(
             )
 
             models_training.append(train_model)
-    
-    decide_model_selection = DummyOperator(
-        task_id="decide_model_selection",
+        
+    skip_training = DummyOperator(task_id="skip_training")  
+
+    # ------------------------------
+    # MODEL DEPLOYMENT
+    # ------------------------------
+    deploy_gate = DummyOperator(
+        task_id="deploy_gate",
         trigger_rule="none_failed_min_one_success"
     )
 
-    # -------- MODEL SELECTION --------
-    with TaskGroup("model_selection") as model_selection:
+    with TaskGroup("model_deployment") as model_deployment:
         # -------------------------------------------------------------------------
         # 1. Check model candidates exist
         # -------------------------------------------------------------------------            
@@ -310,28 +299,29 @@ with DAG(
             execution_timeout=timedelta(hours=1),
         )
     
-        check_model_candidates >> best_model_selection
-    
-    # -------- BEST MODEL DEPLOYMENT --------
-    best_model_deployment = BashOperator(
-        task_id="best_model_deployment",
-        bash_command=f"""
-            python /opt/airflow/scripts/train_deploy/best_model_deployment.py \
-            --best-model-json {{{{params.model_bank}}}}/best_model_{{{{ds | replace('-', '_')}}}}.json \
-            --deployment-dir {{{{params.deployment_dir}}}} \
-            --out-file {{{{params.deployment_dir}}}}deployment_{{{{ds | replace('-', '_')}}}}.json \
-            --alias prod_model.pkl
-        """.strip(),
-        execution_timeout=timedelta(hours=1),
-    )
+        best_model_deployment = BashOperator(
+            task_id="best_model_deployment",
+            bash_command=f"""
+                python /opt/airflow/scripts/train_deploy/best_model_deployment.py \
+                --best-model-json {{{{params.model_bank}}}}/best_model_{{{{ds | replace('-', '_')}}}}.json \
+                --deployment-dir {{{{params.deployment_dir}}}} \
+                --out-file {{{{params.deployment_dir}}}}deployment_{{{{ds | replace('-', '_')}}}}.json \
+                --alias prod_model.pkl
+            """.strip(),
+            execution_timeout=timedelta(hours=1),
+        )
+        
+        check_model_candidates >> best_model_selection >> best_model_deployment
 
+    # ------------------------------
+    # INFERENCE 
+    # ------------------------------
     inference_gate = ShortCircuitOperator(
         task_id="inference_gate",
         python_callable=should_infer,
         op_kwargs={"start_allowed": "2024-10-01"},
     )    
 
-    # -------- INFERENCE --------
     with TaskGroup("inference") as run_inference:        
         with TaskGroup("Batch_Inference") as batch_inference:        
             # -------------------------------------------------
@@ -372,7 +362,9 @@ with DAG(
 
         check_prod_model >> retrieve_features >> infer_prod_model
     
-    # -------- MONITORING --------
+    # ------------------------------
+    # MONITORING
+    # ------------------------------
     with TaskGroup("monitoring") as monitoring:
         # -------------------------------------------------------------------------
         # 1. Start
@@ -489,7 +481,9 @@ with DAG(
         for chart in monitoring_charts:
             chart >> monitoring_completed  # [list] >> task (via loop)
 
-    # -------- DECISION FOR RETRAINING --------
+    # ------------------------------
+    # DECISION FOR RETRAINING
+    # ------------------------------
     def _decide_retrain(**context):
         import pandas as pd
         from pathlib import Path
@@ -559,13 +553,15 @@ with DAG(
         context["ti"].xcom_push(key="reason", value=msg)
         return "retraining" if should else "skip_retraining"
 
-    decide_retrain = BranchPythonOperator(
-        task_id="decide_retrain", 
+    retrain_gate = BranchPythonOperator(
+        task_id="retrain_gate", 
         python_callable=_decide_retrain,
         provide_context=True  # this is needed to get kwargs
     )
 
-    # --- RETRAINING ---
+    # ------------------------------
+    # RETRAINING 
+    # ------------------------------
     """
     Sliding window of K months for dataset used for retraining. 
     Last model trained with L_old, the new retrain uses L_new = L_old + k months. 
@@ -577,8 +573,9 @@ with DAG(
     P_min = 2024-10-01, so L + 6M = 2025-04-01    
     """    
     with TaskGroup("retraining") as retraining:
-        retrain_gate = ShortCircuitOperator(
-            task_id="retrain_gate",
+        
+        check_retrain_conditions = ShortCircuitOperator(
+            task_id="check_retrain_conditions",
             python_callable=should_retrain,
             op_kwargs={"required_months": 2, "last_allowed": "2024-10-01"},
         )    
@@ -598,24 +595,31 @@ with DAG(
 
             models_retraining.append(retrain_model)
 
-        retrain_gate >> models_retraining
+        check_retrain_conditions >> models_retraining
 
-    # --- SKIP RETRAINING ---
     skip_retraining = DummyOperator(task_id="skip_retraining")
 
-    # --- ALERT ---
-    alert_retraining = BashOperator(task_id="alert_retraining", bash_command="echo 'INFO: Retrain'")
-    alert_skip_retrain = BashOperator(task_id="alert_skip_retrain", bash_command="echo 'WARN: Skip retrain'")
+    # ------------------------------
+    # ALERT
+    # ------------------------------
+    with TaskGroup("alert") as alert:
+        alert_retraining = BashOperator(task_id="alert_retraining", bash_command="echo 'INFO: Retraining'")
+        alert_skip_retraining = BashOperator(task_id="alert_skip_retraining", bash_command="echo 'WARN: Skip retraining'")
 
-    # --- END OF END TO END PIPELINE ---
+    # ------------------------------
+    # END OF E2E PIPELINE
+    # ------------------------------
     end1 = BashOperator(task_id="end1", bash_command="echo 'Auto-ML pipeline ended.'")
-    end2 = BashOperator(task_id="end2", bash_command="echo 'Inference and Monitoring pipeline ended.'")
+    end2 = BashOperator(task_id="end2", bash_command="echo 'Auto-ML pipeline ended.'")
 
     # Wiring
     start >> data_pipeline 
-    data_pipeline >> train_gate >> training >> decide_model_selection >> model_selection >> best_model_deployment >> end1
-    data_pipeline >> inference_gate >> run_inference >> monitoring >> decide_retrain
-    decide_retrain >> [retraining, skip_retraining]
-    retraining >> alert_retraining >> end2
-    retraining >> decide_model_selection >> model_selection >> best_model_deployment >> end1
-    skip_retraining >> alert_skip_retrain >> end2
+    data_pipeline >> train_gate 
+    data_pipeline >> inference_gate >> run_inference >> monitoring >> retrain_gate
+    train_gate >> training 
+    train_gate >> skip_training >> end1
+    retrain_gate >> [retraining, skip_retraining]
+    retraining >> alert_retraining >> end1
+    [training, retraining] >> deploy_gate
+    skip_retraining >> alert_skip_retraining >> end1
+    deploy_gate >> model_deployment >> end2
