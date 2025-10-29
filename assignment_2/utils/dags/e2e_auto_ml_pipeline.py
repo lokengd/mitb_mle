@@ -95,7 +95,7 @@ default_args = {
     "depends_on_past": False,
     "email_on_failure": False,
     "email_on_retry": False,
-    "retries": 1,
+    "retries": 0,
     "retry_delay": timedelta(minutes=3),
 }
 with DAG(
@@ -104,8 +104,8 @@ with DAG(
     default_args=default_args,
     start_date=pendulum.datetime(2023, 1, 1, tz="UTC"), 
     end_date=pendulum.datetime(2025, 12, 1, tz="UTC"), # The largest snapshot_date is 2025-11-01 at lms data
-    schedule=None,              # run on demand or put a cron
-    # schedule_interval='0 0 1 * *',  # At 00:00 on day-of-month 1
+    schedule_interval='0 0 1 * *',  # At 00:00 on day-of-month 1
+    # schedule=None,             
     catchup=True,
     max_active_runs=1,
     params={
@@ -121,7 +121,7 @@ with DAG(
         "monitor_store": MONITOR_STORE,
         "ref_windows": ["2024_08_01", "2024_09_01"],   # 2 months OOT data as reference for monitoring
         # For retraining
-        "perf_thresholds": {                             # performance guardrails (applied when labels exist)
+        "perf_thresholds": {  # performance guardrails (applied when labels exist)
             "auc_min": 0.62,
             "gini_min": 0.24,
             "accuracy_min": 0.70,
@@ -141,18 +141,13 @@ with DAG(
 ) as dag:
 
     # ------------------------------
-    # START OF E2E PIPELINE
-    # ------------------------------
-    start = BashOperator(task_id="start", bash_command="echo 'Start auto-ml end to end pipeline.'")
-    
-    # ------------------------------
     # MEDALLION PIPELINE 
     # ------------------------------
     with TaskGroup("data_pipeline") as data_pipeline:
         # -------------------------------------------------
         # 1. Check dependencies: Check raw data is available
         # -------------------------------------------------    
-        with TaskGroup("data_pipeline_start", tooltip="Check raw data is available") as data_pipeline_start:
+        with TaskGroup("raw_data_ingestion", tooltip="Check raw data is available") as raw_data_ingestion:
 
             check_data_attributes = FileSensor(
                 task_id="check_data_attributes",
@@ -195,39 +190,105 @@ with DAG(
         # -------------------------------------------------
         # 2. Data processing tasks: bronze, silver, gold
         # -------------------------------------------------    
-        bronze_layer = BashOperator(
-            task_id="bronze_layer",
-            bash_command=f"""
-                python /opt/airflow/scripts/data_processing/process_bronze_batch.py \
-                --snapshot-date "{{{{ds}}}}" \
-                """.strip(),
-            execution_timeout=timedelta(hours=1),
-        )
+        with TaskGroup("bronze_data_lake", tooltip="Bronze data lake") as bronze_data_lake:
+            bronze_attributes = BashOperator(
+                task_id="bronze_attributes",
+                bash_command=f"""
+                    python /opt/airflow/scripts/data_processing/process_bronze_batch.py \
+                    --snapshot-date "{{{{ds}}}}" \
+                    --data-source fe_attributes 
+                    """.strip(),
+                execution_timeout=timedelta(hours=1),
+            )
+            bronze_financials = BashOperator(
+                task_id="bronze_financials",
+                bash_command=f"""
+                    python /opt/airflow/scripts/data_processing/process_bronze_batch.py \
+                    --snapshot-date "{{{{ds}}}}" \
+                    --data-source fe_financials 
+                    """.strip(),
+                execution_timeout=timedelta(hours=1),
+            )
+            bronze_clickstream = BashOperator(
+                task_id="bronze_clickstream",
+                bash_command=f"""
+                    python /opt/airflow/scripts/data_processing/process_bronze_batch.py \
+                    --snapshot-date "{{{{ds}}}}" \
+                    --data-source fe_clickstream 
+                    """.strip(),
+                execution_timeout=timedelta(hours=1),
+            )
+            bronze_lms = BashOperator(
+                task_id="bronze_lms",
+                bash_command=f"""
+                    python /opt/airflow/scripts/data_processing/process_bronze_batch.py \
+                    --snapshot-date "{{{{ds}}}}" \
+                    --data-source lms 
+                    """.strip(),
+                execution_timeout=timedelta(hours=1),
+            )
 
-        silver_layer = BashOperator(
-            task_id="silver_layer",
-            bash_command = """
-                    python /opt/airflow/scripts/data_processing/process_silver_batch.py \
-                        --snapshot-date "{{ ds }}"
-                """.strip(),
-            execution_timeout=timedelta(hours=1),
-        )
+            [bronze_attributes, bronze_financials, bronze_clickstream, bronze_lms]
 
-        gold_layer = BashOperator(
-            task_id="gold_layer",
+        with TaskGroup("silver_datamart", tooltip="Silver data mart") as silver_datamart:
+            silver_attributes = BashOperator(
+                task_id="silver_attributes",
+                bash_command = """
+                        python /opt/airflow/scripts/data_processing/process_silver_batch.py \
+                            --snapshot-date "{{ ds }}" \
+                            --data-source fe_attributes 
+                    """.strip(),
+                execution_timeout=timedelta(hours=1),
+            )
+            silver_financials = BashOperator(
+                task_id="silver_financials",
+                bash_command = """
+                        python /opt/airflow/scripts/data_processing/process_silver_batch.py \
+                            --snapshot-date "{{ ds }}" \
+                            --data-source fe_financials
+                    """.strip(),
+                execution_timeout=timedelta(hours=1),
+            )
+            silver_clickstream = BashOperator(
+                task_id="silver_clickstream",
+                bash_command = """
+                        python /opt/airflow/scripts/data_processing/process_silver_batch.py \
+                            --snapshot-date "{{ ds }}" \
+                            --data-source fe_clickstream 
+                    """.strip(),
+                execution_timeout=timedelta(hours=1),
+            )
+            silver_lms = BashOperator(
+                task_id="silver_lms",
+                bash_command = """
+                        python /opt/airflow/scripts/data_processing/process_silver_batch.py \
+                            --snapshot-date "{{ ds }}" \
+                            --data-source lms 
+                    """.strip(),
+                execution_timeout=timedelta(hours=1),
+            )
+            
+            [silver_attributes, silver_financials, silver_clickstream, silver_lms]
+
+
+        # -------------------------------------------------
+        # 3. Feature store 
+        # -------------------------------------------------
+        gold_datamart = BashOperator(
+            task_id="gold_datamart",
             bash_command = """
                     python /opt/airflow/scripts/data_processing/process_gold_batch.py \
-                        --snapshot-date "{{ ds }}" \
+                        --snapshot-date "{{ ds }}" 
                 """.strip(),
             execution_timeout=timedelta(hours=1),
         )
 
-        # -------------------------------------------------
-        # 3. End task
-        # -------------------------------------------------
-        data_pipeline_completed = DummyOperator(task_id="data_pipeline_completed")
+        feature_store_completed = DummyOperator(task_id="feature_store_completed")
 
-        data_pipeline_start >> bronze_layer >> silver_layer >> gold_layer >> data_pipeline_completed 
+    check_data_attributes >> bronze_attributes >> silver_attributes >> gold_datamart >> feature_store_completed 
+    check_data_financials >> bronze_financials >> silver_financials >> gold_datamart >> feature_store_completed 
+    check_data_clickstream >> bronze_clickstream >> silver_clickstream >> gold_datamart >> feature_store_completed 
+    check_data_lms >> bronze_lms >> silver_lms >> gold_datamart >> feature_store_completed 
 
     def _decide_train(**ctx):
         return "training" if should_train(equired_months=14, last_allowed="2024-09-01", **ctx) else "skip_training"
@@ -322,43 +383,42 @@ with DAG(
         op_kwargs={"start_allowed": "2024-10-01"},
     )    
 
-    with TaskGroup("inference") as run_inference:        
-        with TaskGroup("Batch_Inference") as batch_inference:        
-            # -------------------------------------------------
-            # 1. Check dependencies: model file exists
-            # -------------------------------------------------
-            check_prod_model = FileSensor(
-                task_id="check_prod_model",
-                fs_conn_id="fs_default",   
-                filepath=f"""{{{{params.deployment_dir}}}}{{{{params.prod_model_name}}}}.pkl""".strip(),
-                poke_interval=60,           
-                timeout=60 * 60,          
-                mode="reschedule",      
-            )
+    with TaskGroup("batch_inference") as batch_inference:        
+        # -------------------------------------------------
+        # 1. Check dependencies: model file exists
+        # -------------------------------------------------
+        check_prod_model = FileSensor(
+            task_id="check_prod_model",
+            fs_conn_id="fs_default",   
+            filepath=f"""{{{{params.deployment_dir}}}}{{{{params.prod_model_name}}}}.pkl""".strip(),
+            poke_interval=60,           
+            timeout=60 * 60,          
+            mode="reschedule",      
+        )
 
-            retrieve_features = FileSensor(
-                task_id="retrieve_features",
-                fs_conn_id="fs_default",      
-                filepath=f"""{{{{params.feature_store}}}}gold_features_{{{{ds | replace('-', '_')}}}}.parquet""".strip(),
-                poke_interval=60,                  
-                timeout=60 * 60,            
-                mode="reschedule",      
-            )
+        retrieve_features = FileSensor(
+            task_id="retrieve_features",
+            fs_conn_id="fs_default",      
+            filepath=f"""{{{{params.feature_store}}}}gold_features_{{{{ds | replace('-', '_')}}}}.parquet""".strip(),
+            poke_interval=60,                  
+            timeout=60 * 60,            
+            mode="reschedule",      
+        )
 
-            # -------------------------------------------------
-            # 2. Batch inference tasks: run inference on new, unseen data after deployment.
-            # -------------------------------------------------
-            infer_prod_model = BashOperator(
-                task_id="infer_prod_model",
-                bash_command=f"""
-                    python /opt/airflow/scripts/mlops/batch_inference.py \
-                    --snapshot-date "{{{{ds}}}}" \
-                    --model-name "{{{{params.prod_model_name}}}}" \
-                    --deployment-dir "{{{{params.deployment_dir}}}}" \
-                    --out-dir "{{{{params.pred_store}}}}" \
-                    """.strip(),
-                execution_timeout=timedelta(hours=1),
-            )
+        # -------------------------------------------------
+        # 2. Batch inference tasks: run inference on new, unseen data after deployment.
+        # -------------------------------------------------
+        infer_prod_model = BashOperator(
+            task_id="infer_prod_model",
+            bash_command=f"""
+                python /opt/airflow/scripts/mlops/batch_inference.py \
+                --snapshot-date "{{{{ds}}}}" \
+                --model-name "{{{{params.prod_model_name}}}}" \
+                --deployment-dir "{{{{params.deployment_dir}}}}" \
+                --out-dir "{{{{params.pred_store}}}}" \
+                """.strip(),
+            execution_timeout=timedelta(hours=1),
+        )
 
         check_prod_model >> retrieve_features >> infer_prod_model
     
@@ -606,20 +666,13 @@ with DAG(
         alert_retraining = BashOperator(task_id="alert_retraining", bash_command="echo 'INFO: Retraining'")
         alert_skip_retraining = BashOperator(task_id="alert_skip_retraining", bash_command="echo 'WARN: Skip retraining'")
 
-    # ------------------------------
-    # END OF E2E PIPELINE
-    # ------------------------------
-    end1 = BashOperator(task_id="end1", bash_command="echo 'Auto-ML pipeline ended.'")
-    end2 = BashOperator(task_id="end2", bash_command="echo 'Auto-ML pipeline ended.'")
-
     # Wiring
-    start >> data_pipeline 
     data_pipeline >> train_gate 
-    data_pipeline >> inference_gate >> run_inference >> monitoring >> retrain_gate
+    data_pipeline >> inference_gate >> batch_inference >> monitoring >> retrain_gate
     train_gate >> training 
-    train_gate >> skip_training >> end1
+    train_gate >> skip_training
     retrain_gate >> [retraining, skip_retraining]
-    retraining >> alert_retraining >> end1
+    retraining >> alert_retraining 
     [training, retraining] >> deploy_gate
-    skip_retraining >> alert_skip_retraining >> end1
-    deploy_gate >> model_deployment >> end2
+    skip_retraining >> alert_skip_retraining
+    deploy_gate >> model_deployment

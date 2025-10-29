@@ -380,8 +380,13 @@ def _create_one_hot_encoding_annual_income(spark, gold_dir, partition_name, df, 
     helper.save_parquet_file(df_one_hot, filepath, logger)
 
 
-def main(snapshot_date, silver_manifest):
+def main():
 
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--snapshot-date", type=str, required=True, help="YYYY-MM-DD")
+    parser.add_argument("--silver_manifest", required=False)
+    args = parser.parse_args()
+    
     # -------------------------
     # Read XCom manifest
     # -------------------------
@@ -464,7 +469,7 @@ def main(snapshot_date, silver_manifest):
         }  
     } 
 
-    partition = snapshot_date # Monthly batch processing based on snapshot_date, process one snapshot_date at a time
+    partition = args.snapshot_date # Monthly batch processing based on snapshot_date, process one snapshot_date at a time
     silver_config = [{**item} for item in raw_config]
     for raw in raw_config:
         silver_dir = silver_dir_prefix + raw['src'] + "/"
@@ -497,9 +502,4 @@ def main(snapshot_date, silver_manifest):
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--snapshot-date", type=str, required=True, help="YYYY-MM-DD")
-    parser.add_argument("--silver_manifest", required=False)
-    args = parser.parse_args()
-    
-    main(args.snapshot_date, args.silver_manifest)
+    main()

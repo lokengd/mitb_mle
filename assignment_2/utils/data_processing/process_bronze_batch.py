@@ -41,6 +41,7 @@ def _ingest_data(raw_file, snapshot_date_str, bronze_dir, spark, logger):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--snapshot-date", type=str, required=True, help="YYYY-MM-DD")
+    parser.add_argument("--data-source", type=str, required=True)
     args = parser.parse_args()
 
      # -------------------------
@@ -65,14 +66,16 @@ def main():
     # prepare bronze config cloning from raw config: for each source, add partitions (default empty array)
     bronze_config = [{**item, 'partitions': []} for item in raw_config]
     for raw in raw_config:
-        bronze_dir = bronze_dir_prefix + raw['src'] + "/"
-        if not os.path.exists(bronze_dir):
-            os.makedirs(bronze_dir)
-        print(f"\nProcessing bronze data: {bronze_dir}{raw['filename']}...")
-        index = next(i for i, item in enumerate(bronze_config) if item['src'] == raw['src'])
-        raw_file = {key: raw[key] for key in ['dir','filename']}
-        bronze_config[index]['partitions'] = process_data(raw_file, bronze_dir, args.snapshot_date, spark, logger)
-        bronze_config[index]['dir'] = bronze_dir
+        if args.data_source == raw['src']:
+            bronze_dir = bronze_dir_prefix + raw['src'] + "/"
+            if not os.path.exists(bronze_dir):
+                os.makedirs(bronze_dir)
+            print(f"\nProcessing bronze data: {bronze_dir}{raw['filename']}...")
+            index = next(i for i, item in enumerate(bronze_config) if item['src'] == raw['src'])
+            raw_file = {key: raw[key] for key in ['dir','filename']}
+            bronze_config[index]['partitions'] = process_data(raw_file, bronze_dir, args.snapshot_date, spark, logger)
+            bronze_config[index]['dir'] = bronze_dir
+            break
 
     # end spark session
     spark.stop()

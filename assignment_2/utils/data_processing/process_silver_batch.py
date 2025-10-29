@@ -625,7 +625,13 @@ def _save_file(df, file_path, file_label, partition_name, logger):
 
 
 
-def main(snapshot_date, bronze_manifest):
+def main():
+
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--snapshot-date", type=str, required=True, help="YYYY-MM-DD")
+    parser.add_argument("--data-source", type=str, required=True)
+    parser.add_argument("--bronze_manifest", required=False)
+    args = parser.parse_args()
 
     # # -------------------------
     # # Read XCom manifest
@@ -684,18 +690,19 @@ def main(snapshot_date, bronze_manifest):
         bronze_config[index]['dir'] = bronze_dir    
     silver_config = [{**item} for item in bronze_config]
 
-    partition = snapshot_date # Monthly batch processing based on snapshot_date, process one snapshot_date at a time
+    partition = args.snapshot_date # Monthly batch processing based on snapshot_date, process one snapshot_date at a time
 
     for bronze in bronze_config:
-        silver_dir = silver_dir_prefix + bronze['src'] + "/"    
-        if not os.path.exists(silver_dir):
-            os.makedirs(silver_dir)  
-              
-        print(f"\nProcessing silver data {bronze['src']} partition {partition}...")    
-        bronze_file = {key: bronze[key] for key in ['dir','filename']}
-        process_data(bronze['src'], partition, bronze_file, silver_dir, spark, logger)
-        index = next(i for i, item in enumerate(bronze_config) if item['src'] == bronze['src'])
-        silver_config[index]['dir'] = silver_dir
+        if args.data_source == bronze['src']:
+            silver_dir = silver_dir_prefix + bronze['src'] + "/"    
+            if not os.path.exists(silver_dir):
+                os.makedirs(silver_dir)  
+                
+            print(f"\nProcessing silver data {bronze['src']} partition {partition}...")    
+            bronze_file = {key: bronze[key] for key in ['dir','filename']}
+            process_data(bronze['src'], partition, bronze_file, silver_dir, spark, logger)
+            index = next(i for i, item in enumerate(bronze_config) if item['src'] == bronze['src'])
+            silver_config[index]['dir'] = silver_dir
 
     # end spark session
     spark.stop()
@@ -705,11 +712,6 @@ def main(snapshot_date, bronze_manifest):
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--snapshot-date", type=str, required=True, help="YYYY-MM-DD")
-    parser.add_argument("--bronze_manifest", required=False)
-    args = parser.parse_args()
-    
-    silver_config = main(args.snapshot_date, args.bronze_manifest)
+    silver_config = main()
     # Serialize and print the bronze manifest as JSON (as XCom requires string output)
     # print(json.dumps({"silver_manifest": silver_config}))
