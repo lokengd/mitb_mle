@@ -15,6 +15,7 @@ def _to_month_dt(month_str_series: pd.Series) -> pd.Series:
 
 def main():
     parser = argparse.ArgumentParser()
+    parser.add_argument("--snapshot-date", required=False, type=str) # needed for out-file date stamping
     parser.add_argument("--model-name", required=True, type=str)
     parser.add_argument("--history-file", required=True, type=str)
     parser.add_argument("--out-dir", required=True, help="Output directory")
@@ -77,7 +78,7 @@ def main():
             plt.ylabel("PSI")
             plt.xlabel("Month")
             plt.tight_layout()
-            path = os.path.join(out_dir, f"psi_{m}.png")
+            path = os.path.join(out_dir, f"psi_{m}_{args.snapshot_date.replace('-','_')}.png")
             plt.savefig(path); plt.close()
             print(f"Saved: {path}")
     # -------------------------
@@ -100,7 +101,7 @@ def main():
             plt.xlabel("Month")
             plt.tight_layout()
             safe_feat = str(feat).replace("/", "_").replace(" ", "_")
-            path = os.path.join(out_dir, f"csi_{mname}_{safe_feat}.png")
+            path = os.path.join(out_dir, f"csi_{mname}_{safe_feat}_{args.snapshot_date.replace('-','_')}.png")
             plt.savefig(path); plt.close()
             print(f"Saved: {path}")
 
@@ -128,7 +129,7 @@ def main():
             plt.xlabel("Month")
             plt.legend(ncol=2)
             plt.tight_layout()
-            path = os.path.join(out_dir, f"csi_top{len(topk_feats)}_{title_model}.png")
+            path = os.path.join(out_dir, f"csi_top{len(topk_feats)}_{title_model}_{args.snapshot_date.replace('-','_')}.png")
             plt.savefig(path); plt.close()
             print(f"Saved: {path}")
 

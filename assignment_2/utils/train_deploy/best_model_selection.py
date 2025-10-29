@@ -1,5 +1,6 @@
 import argparse, os, json, pickle, sys
 from datetime import datetime
+import re
 
 def load_metric(pkl_path, metric_key):
     with open(pkl_path, "rb") as f:
@@ -21,13 +22,40 @@ def main():
     args = parser.parse_args()
 
     # -------------------------
-    # Load model candidates (TODO OOT mode, retraining?)
+    # Load model candidates
     # -------------------------
+    # candidates = []
+    # for model in args.model_candidates:   
+    #     pkl = os.path.join(args.model_bank, f"{model}_{args.snapshot_date.replace('-', '_')}.pkl")
+    #     candidates.append(pkl)
+    # print("Model candidates: {candidates}")
+
+    # compare the most recent 6 models per candidate
+    def _extract_date_from_filename(fname: str):
+        # expecting like: model_xgb_2024_09_01.pkl
+        m = re.search(r"_(\d{4}_\d{2}_\d{2})\.pkl$", fname)
+        if m:
+            return m.group(1)
+        return None
+
     candidates = []
-    for model in args.model_candidates:   
-        pkl = os.path.join(args.model_bank, f"{model}_{args.snapshot_date.replace('-', '_')}.pkl")
-        candidates.append(pkl)
-    print("Model candidates: {candidates}")
+    for model in args.model_candidates:
+        all_pkls = [
+            os.path.join(args.model_bank, f)
+            for f in os.listdir(args.model_bank)
+            if f.startswith(model + "_") and f.endswith(".pkl")
+        ]
+        # sort by date descending
+        all_pkls = sorted(
+            all_pkls,
+            key=lambda f: _extract_date_from_filename(os.path.basename(f)),
+            reverse=True,
+        )
+        # take top 6
+        recent = all_pkls[:6]
+        candidates.extend(recent)
+
+    print("Model candidates:", candidates)    
 
 
     # -------------------------
@@ -67,11 +95,28 @@ def main():
         },
     }
 
-    os.makedirs(os.path.dirname(args.out_file), exist_ok=True)
-    with open(args.out_file, "w", encoding="utf-8") as f:
-        json.dump(payload, f, indent=2)
+    json_file = args.out_file
+    if os.path.exists(json_file):
+        with open(json_file, "r", encoding="utf-8") as f:
+            history = json.load(f)
+    else:
+        history = []
 
-    print(f"nBest model: {payload['model_filename']} ({args.metric}={best_score:.6f})")
+    history.append(payload)
+    with open(json_file, "w", encoding="utf-8") as f:
+        json.dump(history, f, indent=2)    
+
+    # Sort by selected_at_utc (latest first)
+    history = sorted(
+        history,
+        key=lambda x: x["selected_at_utc"],
+        reverse=True
+    )
+    # Save back
+    with open(json_file, "w", encoding="utf-8") as f:
+        json.dump(history, f, indent=2)
+
+    print(f"Best model: {payload['model_filename']} {args.metric}={best_score:.6f}")
     print(f"Metadata: {args.out_file}")
 
 if __name__ == "__main__":

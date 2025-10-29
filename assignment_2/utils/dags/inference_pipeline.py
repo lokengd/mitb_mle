@@ -34,7 +34,7 @@ with DAG(
     catchup=True,  # True to create one DAG run per schedule interval from start_date up to “now” (or end_date if set). That’s backfilling historical runs automatically.
     max_active_runs=1, # only one active run at a time
     params={
-        "model_name": "prod_model",
+        "prod_model_name": "prod_model",
         "pred_store": PRED_STORE,
         "deployment_dir": DEPLOYMENT_DIR,
         "period_tag": "PROD", # "TRAIN | VAL | TEST | OOT | PROD"
@@ -58,7 +58,7 @@ with DAG(
         check_model = FileSensor(
             task_id="check_model",
             fs_conn_id="fs_default",   
-            filepath=f"""{{{{params.deployment_dir}}}}{{{{params.model_name}}}}.pkl""".strip(),
+            filepath=f"""{{{{params.deployment_dir}}}}{{{{params.prod_model_name}}}}.pkl""".strip(),
             poke_interval=60,           
             timeout=60 * 60,          
             mode="reschedule",      
@@ -72,7 +72,7 @@ with DAG(
             bash_command=f"""
                 python /opt/airflow/scripts/mlops/batch_inference.py \
                 --snapshot-date "{{{{ds}}}}" \
-                --model-name "{{{{params.model_name}}}}" \
+                --model-name "{{{{params.prod_model_name}}}}" \
                 --deployment-dir "{{{{params.deployment_dir}}}}" \
                 --out-dir "{{{{params.pred_store}}}}" \
                 """.strip(),

@@ -83,5 +83,5 @@ def main():
 
 if __name__ == "__main__":
     bronze_config = main()
-    # Serialize and print the bronze manifest as JSON (as XCom requires string output)
-    print(json.dumps({"bronze_manifest": bronze_config}))
+    # # Serialize and print the bronze manifest as JSON (as XCom requires string output)
+    # print(json.dumps({"bronze_manifest": bronze_config}))

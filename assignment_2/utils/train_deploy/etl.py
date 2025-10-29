@@ -16,9 +16,6 @@ def load_gold_features_date_range(spark, start_date, end_date):
     features_sdf = feature_store_sdf.filter((col("snapshot_date") >= start_date) & (col("snapshot_date") <= end_date))
     print("extracted features_sdf count:", features_sdf.count(), "start_date:", start_date, "end_date:", end_date)
     features_sdf.show(10)
-
-    #TODO use surrogate label as a feature : dsl_label, dsl_missing etc
-
     return features_sdf
 
 def load_gold_features_snapshot(spark, snapshot_date):

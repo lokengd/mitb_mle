@@ -59,7 +59,7 @@ with DAG(
     best_model_selection = BashOperator(
         task_id="best_model_selection",
         bash_command=f"""
-            python /opt/airflow/scripts/mlops/best_model_selection.py \
+            python /opt/airflow/scripts/train_deploy/best_model_selection.py \
             --snapshot-date {{{{ds}}}} \
             --model-candidates {{{{' '.join(params.models)}}}} \
             --model-bank {{{{params.model_bank}}}} \
@@ -74,7 +74,7 @@ with DAG(
     best_model_deployment = BashOperator(
         task_id="best_model_deployment",
         bash_command=f"""
-            python /opt/airflow/scripts/mlops/best_model_deployment.py \
+            python /opt/airflow/scripts/train_deploy/best_model_deployment.py \
             --best-model-json {{{{params.model_bank}}}}/best_model_{{{{ds | replace('-', '_')}}}}.json \
             --deployment-dir {{{{params.deployment_dir}}}} \
             --out-file {{{{params.deployment_dir}}}}deployment_info_{{{{ds | replace('-', '_')}}}}.json \

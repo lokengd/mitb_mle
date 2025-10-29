@@ -1,4 +1,3 @@
-# dags/monitoring_pipeline.py
 import os
 from datetime import timedelta
 import pendulum
@@ -10,6 +9,7 @@ from airflow.sensors.filesystem import FileSensor
 from airflow.utils.task_group import TaskGroup
 from airflow.operators.dummy import DummyOperator
 from airflow.models.baseoperator import cross_downstream
+from airflow.operators.python import PythonOperator
 
 from scripts.config import FEATURE_STORE, MONITOR_STORE, PRED_STORE, LABEL_STORE
 
@@ -17,6 +17,7 @@ def add_months(ds: str, months: int, fmt: str = "%Y_%m_%d") -> str:
     # ds is "YYYY-MM-DD"
     return pendulum.parse(ds).add(months=months).strftime(fmt)
 
+REF_WINDOW = ["2024_07_01", "2024_08_01"]  # last 2 months OOT data as reference
 DAG_ID = "monitoring_pipeline"
 default_args = {
     "owner": "airflow",
@@ -26,7 +27,6 @@ default_args = {
     "retries": 1,
     "retry_delay": timedelta(minutes=3),
 }
-REF_WINDOW = ["2024_07_01", "2024_08_01"]  # last 2 months OOT data as reference
 
 with DAG(
     dag_id=DAG_ID,
@@ -34,10 +34,10 @@ with DAG(
     description="Model monitoring over a snapshot (performance + stability) and store results as gold table",
     schedule=None,  # trigger manually or by orchestrator
     start_date=pendulum.datetime(2024, 9, 1, tz="UTC"),
-    catchup=True,
-    max_active_runs=1,
+    catchup=False,
+    max_active_runs=5,
     params={
-        "models": ["prod_model"],
+        "prod_models": ["prod_model"],
         "pred_store": PRED_STORE,
         "label_store": LABEL_STORE,
         "feature_store": FEATURE_STORE,
@@ -52,20 +52,21 @@ with DAG(
     # 1. Common start & checks (labels exist for the logical date)
     # -------------------------------------------------------------------------
     monitoring_start = DummyOperator(task_id="monitoring_start")
-    check_labels = FileSensor(
-            task_id="check_labels",
-            fs_conn_id="fs_default",
-            filepath="""{{params.label_store}}primary/gold_lms_loan_daily_{{ds | replace('-', '_')}}.parquet""".strip(),
-            poke_interval=60,
-            timeout=60 * 60,
-            mode="reschedule",
-    )
-
+    # Not needed to check labels based on current logical date; Label T+6 is what we need for perf monitoring
+    # check_labels = FileSensor(
+    #         task_id="check_labels",
+    #         fs_conn_id="fs_default",
+    #         filepath="""{{params.label_store}}primary/gold_lms_loan_daily_{{ds | replace('-', '_')}}.parquet""".strip(),
+    #         poke_interval=60,
+    #         timeout=60 * 60,
+    #         mode="reschedule",
+    # )
+    
     # -------------------------------------------------------------------------
     # 2. Monitor each model in parallel
     # -------------------------------------------------------------------------
     models_monitoring = []
-    for model in dag.params["models"]: 
+    for model in dag.params["prod_models"]: 
         with TaskGroup(group_id=f"{model}_monitoring", tooltip=f"Monitoring for {model}") as g:
 
             # ----------------------------------------------------------
@@ -127,14 +128,14 @@ with DAG(
     # 4. Visualization
     # --------------------------------------------
     monitoring_charts = []
-    for model in dag.params["models"]: 
+    for model in dag.params["prod_models"]: 
         with TaskGroup(group_id=f"{model}_charting", tooltip=f"Visualization: create monitoring charts for {model}") as g:
             stability_plotting = BashOperator(
                 task_id=f"{model}_stability_plotting",
                 bash_command=f"""
                     python /opt/airflow/scripts/mlops/stability_plotting.py \
                     --model-name "{model}" \
-                    --history-file {{{{params.monitor_store}}}}stability/{model}/{model}_stability_history.parquet \
+                    --history-file {{{{params.monitor_store}}}}stability/stability_history.parquet \
                     --out-dir {{{{params.monitor_store}}}}charts \
                     """.strip(),               
                 execution_timeout=timedelta(hours=1),
@@ -165,11 +166,12 @@ with DAG(
 
 
     # a) Chain the single tasks
-    monitoring_start >> check_labels
+    # monitoring_start >> check_labels
+    monitoring_start >> models_monitoring  # task >> [list] is allowed
 
     # b) Fan out from check_labels to every monitoring task
-    check_labels >> models_monitoring  # task >> [list] is allowed
-
+    # check_labels >> models_monitoring  # task >> [list] is allowed
+    
     # c) Connect every monitoring task to every chart task
     cross_downstream(models_monitoring, monitoring_charts)  # [list] -> [list]
 

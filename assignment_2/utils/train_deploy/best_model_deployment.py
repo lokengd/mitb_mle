@@ -13,13 +13,14 @@ def main():
     # Path validations
     # -------------------------
     if not os.path.exists(args.best_model_json):
-        print(f"Missing best-model json: {args.best_model_json}", file=sys.stderr)
+        print(f"Missing best_model.json: {args.best_model_json}", file=sys.stderr)
         sys.exit(1)
 
     with open(args.best_model_json, "r", encoding="utf-8") as f:
-        best = json.load(f)
+        best_model_json = json.load(f)
 
-    src = best.get("model_path")
+    best_model = best_model_json[0] # always take the latest best_model_json[0] for now
+    src = best_model.get("model_path") # always take the latest best_model_json[0] for now
     if not src or not os.path.exists(src):
         print(f"Model path not found: {src}", file=sys.stderr)
         sys.exit(2)
@@ -38,21 +39,38 @@ def main():
     shutil.copy2(src, pkl_alias)
 
     # write deployment metadata
-    info = {
+    metadata = {
         "deployed_at_utc": datetime.now().isoformat() + "Z",
         "source_pickle": src,
         "deployed_pickle": pkl_versioned,
         "alias": pkl_alias,
-        "snapshot_date": best.get("snapshot_date"),
-        "selection_metric": best.get("selection_metric"),
-        "selection_value": best.get("selection_value"),
-        "model_name": best.get("model_name"),
-        "model_filename": best.get("model_filename"),
+        "snapshot_date": best_model.get("snapshot_date"),
+        "selection_metric": best_model.get("selection_metric"),
+        "selection_value": best_model.get("selection_value"),
+        "model_name": best_model.get("model_name"),
+        "model_filename": best_model.get("model_filename"),
     }
 
-    os.makedirs(os.path.dirname(args.out_file), exist_ok=True)
-    with open(args.out_file, "w", encoding="utf-8") as f:
-        json.dump(info, f, indent=2)
+    json_file = args.out_file
+    if os.path.exists(json_file):
+        with open(json_file, "r", encoding="utf-8") as f:
+            history = json.load(f)
+    else:
+        history = []
+
+    history.append(metadata)
+    with open(json_file, "w", encoding="utf-8") as f:
+        json.dump(history, f, indent=2)    
+
+    # Sort by deployed_at_utc (latest first)
+    history = sorted(
+        history,
+        key=lambda x: x["deployed_at_utc"],
+        reverse=True
+    )
+    # Save back
+    with open(json_file, "w", encoding="utf-8") as f:
+        json.dump(history, f, indent=2)
 
     print(f"Deployed: {pkl_versioned}\n  alias -> {pkl_alias}")
     print(f"Metadata: {args.out_file}")

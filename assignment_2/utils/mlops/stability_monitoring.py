@@ -88,7 +88,6 @@ def main():
     # Prepare output directory
     # -------------------------
     # using model_name as subdir
-    snapshot_date_str = args.snapshot_date
     out_dir = Path(args.out_dir) / args.model_name 
     if not os.path.exists(out_dir):
         os.makedirs(out_dir)
@@ -187,9 +186,9 @@ def main():
         print(f"Appended history: {hist_path}, {csv_path}")
         return hist_sdf
     
-    common_hist_path = os.path.join(out_dir, f"{args.model_name}_stability_history.parquet")
-    psi_hist = append_history(common_hist_path, psi_df)
-    csi_hist = append_history(common_hist_path, csi_df)
+    stability_hist_path = os.path.join(args.out_dir, "stability_history.parquet")
+    psi_hist = append_history(stability_hist_path, psi_df)
+    csi_hist = append_history(stability_hist_path, csi_df)
  
     if csi_hist is not None and len(csi_hist["month"].unique()) > 1: 
         csi_timeseries = csi_hist.sort_values(["feature", "month"])  # ensure order
@@ -200,7 +199,7 @@ def main():
             .reset_index()
             .sort_values("max_psi", ascending=False)
         )
-        summary_file = str(out_dir / f"{args.model_name}_stats_summary_{snapshot_date_str.replace('-', '_')}.csv")
+        summary_file = str(out_dir / f"{args.model_name}_stats_summary_{args.snapshot_date.replace('-', '_')}.csv")
         summary.to_csv(summary_file, index=False)
         print(f"Stability stats summary: {summary_file}")    
     else: 

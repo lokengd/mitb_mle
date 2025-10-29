@@ -11,7 +11,7 @@ from pyspark.sql.window import Window
 
 from data_processing import helper_functions as helper
 from data_processing.logger import get_spark_logger
-from scripts.config import DATAMART
+from scripts.config import DATAMART, raw_config
 
 
 MAX_AGE = 150 # no one lives beyond this age
@@ -627,22 +627,33 @@ def _save_file(df, file_path, file_label, partition_name, logger):
 
 def main(snapshot_date, bronze_manifest):
 
-    # -------------------------
-    # Read XCom manifest
-    # -------------------------
-    bronze_config = None
-    with open(bronze_manifest) as f:
-        obj = json.load(f)           # could be a dict/list OR a string
-    if isinstance(obj, str):
-        print("bronze_manifest is a string")
-        bronze_config = json.loads(obj)  # de-quote the inner JSON string
-        bronze_config = bronze_config['bronze_manifest']
+    # # -------------------------
+    # # Read XCom manifest
+    # # -------------------------
+    # bronze_config = None
+    
+    # with open(bronze_manifest) as f:
+    #     try:
+    #         obj = json.load(f)
+    #     except json.JSONDecodeError:
+    #         raise ValueError("bronze_manifest file is empty or not valid JSON")
 
-    if not bronze_config:   # covers None or empty
-        print("No bronze config found, exiting...")
-        raise ValueError("bronze_config is empty or not found")
-    else:
-        print("bronze_config",json.dumps(bronze_config, indent=4))
+    # print("obj type:", type(obj), "obj:", obj)
+
+    # if isinstance(obj, str):
+    #     print("bronze_manifest is a string")
+    #     bronze_config = json.loads(obj)  # de-quote the inner JSON string
+    #     bronze_config = bronze_config['bronze_manifest']
+
+    # if isinstance(obj, dict) and "bronze_manifest" in obj:
+    #     bronze_config = obj["bronze_manifest"]
+    # else:
+    #     bronze_config = obj
+
+    # if not bronze_config:   # covers None or empty
+    #     raise ValueError("bronze_config is empty or not found")
+    # else:
+    #     print("bronze_config",json.dumps(bronze_config, indent=4))
 
     
     # -------------------------
@@ -663,9 +674,16 @@ def main(snapshot_date, bronze_manifest):
     # Create silver data lake
     # -----------------------
     print("\nRun silver backfill")    
+    bronze_dir_prefix = f"{DATAMART}/bronze/"
     silver_dir_prefix = f"{DATAMART}/silver/"
     # prepare silver config cloning from bronze config, including partitions
+    bronze_config = [{**item} for item in raw_config]
+    for raw in raw_config:
+        bronze_dir = bronze_dir_prefix + raw['src'] + "/"
+        index = next(i for i, item in enumerate(bronze_config) if item['src'] == raw['src'])
+        bronze_config[index]['dir'] = bronze_dir    
     silver_config = [{**item} for item in bronze_config]
+
     partition = snapshot_date # Monthly batch processing based on snapshot_date, process one snapshot_date at a time
 
     for bronze in bronze_config:
@@ -689,9 +707,9 @@ def main(snapshot_date, bronze_manifest):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--snapshot-date", type=str, required=True, help="YYYY-MM-DD")
-    parser.add_argument("--bronze_manifest", required=True)
+    parser.add_argument("--bronze_manifest", required=False)
     args = parser.parse_args()
     
     silver_config = main(args.snapshot_date, args.bronze_manifest)
     # Serialize and print the bronze manifest as JSON (as XCom requires string output)
-    print(json.dumps({"silver_manifest": silver_config}))
+    # print(json.dumps({"silver_manifest": silver_config}))

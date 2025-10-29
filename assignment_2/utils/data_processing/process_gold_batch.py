@@ -10,7 +10,7 @@ from pyspark.sql import Row
 from data_processing import helper_functions as helper
 from data_processing.logger import get_spark_logger
 from data_processing.process_silver_full_batch import ANNUAL_INCOME_GROUP, LOAN_TYPES
-from scripts.config import DATAMART, FEATURE_STORE, LABEL_STORE
+from scripts.config import DATAMART, FEATURE_STORE, LABEL_STORE, raw_config
 
 
 def process_data(source, partition, silver_file, gold_dir, labeling_rule, spark, logger):
@@ -385,19 +385,19 @@ def main(snapshot_date, silver_manifest):
     # -------------------------
     # Read XCom manifest
     # -------------------------
-    silver_config = None
-    with open(silver_manifest) as f:
-        obj = json.load(f)           # could be a dict/list OR a string
-    if isinstance(obj, str):
-        print("silver_manifest is a string")
-        silver_config = json.loads(obj)  # de-quote the inner JSON string
-        silver_config = silver_config['silver_manifest']
+    # silver_config = None
+    # with open(silver_manifest) as f:
+    #     obj = json.load(f)           # could be a dict/list OR a string
+    # if isinstance(obj, str):
+    #     print("silver_manifest is a string")
+    #     silver_config = json.loads(obj)  # de-quote the inner JSON string
+    #     silver_config = silver_config['silver_manifest']
     
-    if not silver_config:   # covers None or empty
-        print("No silver_config found, exiting...")
-        raise ValueError("silver_config is empty or not found")
-    else:
-        print("silver_config",json.dumps(silver_config, indent=4))
+    # if not silver_config:   # covers None or empty
+    #     print("No silver_config found, exiting...")
+    #     raise ValueError("silver_config is empty or not found")
+    # else:
+    #     print("silver_config",json.dumps(silver_config, indent=4))
 
     
     # -------------------------
@@ -465,6 +465,12 @@ def main(snapshot_date, silver_manifest):
     } 
 
     partition = snapshot_date # Monthly batch processing based on snapshot_date, process one snapshot_date at a time
+    silver_config = [{**item} for item in raw_config]
+    for raw in raw_config:
+        silver_dir = silver_dir_prefix + raw['src'] + "/"
+        index = next(i for i, item in enumerate(silver_config) if item['src'] == raw['src'])
+        silver_config[index]['dir'] = silver_dir        
+    
     for silver in silver_config:
         for key, value in gold_dir.items():
             if not os.path.exists(value):
@@ -493,7 +499,7 @@ def main(snapshot_date, silver_manifest):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--snapshot-date", type=str, required=True, help="YYYY-MM-DD")
-    parser.add_argument("--silver_manifest", required=True)
+    parser.add_argument("--silver_manifest", required=False)
     args = parser.parse_args()
     
     main(args.snapshot_date, args.silver_manifest)
