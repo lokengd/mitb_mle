@@ -90,6 +90,9 @@ def main():
         # Load feature store
         # -------------------------
         features_pdf, feature_cols = load_features_mob_0(spark, snapshot_date, features)
+        if len(feature_cols)==0:
+            raise ValueError(f"feature_cols is empty: {feature_cols}")
+        
         if "model" in model_artefact:
             inner_model = model_artefact["model"]
             if "LogisticRegression" in str(type(inner_model)):

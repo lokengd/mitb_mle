@@ -1,6 +1,6 @@
 import argparse
 import os
-import glob
+from pathlib import Path
 import pandas as pd
 import pickle
 import matplotlib.pyplot as plt
@@ -12,13 +12,8 @@ import pprint
 import pyspark
 import pyspark.sql.functions as F
 
-from pyspark.sql.functions import col
-from pyspark.sql.types import StringType, IntegerType, FloatType, DateType
-
-from sklearn.model_selection import train_test_split
-from sklearn.preprocessing import StandardScaler
-
 import xgboost as xgb
+from sklearn.preprocessing import StandardScaler
 from sklearn.model_selection import RandomizedSearchCV
 from sklearn.metrics import make_scorer, f1_score, roc_auc_score
 from sklearn.datasets import make_classification
@@ -30,6 +25,7 @@ from train_deploy.etl import load_dataset_mob_0, load_training_dataset, parse_fe
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--snapshot-date", type=str, required=True, help="YYYY-MM-DD")
+    parser.add_argument("--model-name", type=str, required=False, default="model_xgb")
     parser.add_argument("--out-dir", required=True, type=str)
     parser.add_argument("--features", required=True, type=str, nargs="+", help="Features used for training")
 
@@ -40,9 +36,9 @@ def main():
     # -------------------------
     # Prepare output directory
     # -------------------------
-    model_bank_directory = args.out_dir
+    model_bank_directory = Path(args.out_dir)
     if not os.path.exists(model_bank_directory):
-        os.makedirs(model_bank_directory)
+        os.makedirs(model_bank_directory, exist_ok=True)
         
     # -------------------------
     # Initialize SparkSession
@@ -171,10 +167,9 @@ def main():
     # -------------------------------
     # Prepare model artefact to save 
     # -------------------------------
-    model_name = "model_xgb"
     model_artefact = {}
     model_artefact['model'] = best_model
-    model_artefact['model_version'] = f"{model_name}_"+config["model_train_date_str"].replace('-','_')
+    model_artefact['model_version'] = f"{args.model_name}_"+config["model_train_date_str"].replace('-','_')
     model_artefact['preprocessing_transformers'] = {}
     model_artefact['preprocessing_transformers']['stdscaler'] = transformer_stdscaler
     model_artefact['data_dates'] = config

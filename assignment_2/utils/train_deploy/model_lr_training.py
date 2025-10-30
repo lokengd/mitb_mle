@@ -4,6 +4,7 @@ import pickle
 import pprint
 from datetime import datetime, timedelta
 from dateutil.relativedelta import relativedelta
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -22,6 +23,7 @@ from train_deploy.etl import load_dataset_mob_0, load_training_dataset, replace_
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--snapshot-date", type=str, required=True, help="YYYY-MM-DD")
+    parser.add_argument("--model-name", type=str, required=False, default="model_lr")
     parser.add_argument("--out-dir", required=True, type=str)
     parser.add_argument("--features", required=True, type=str, nargs="+", help="Features used for training")
     args = parser.parse_args()
@@ -31,8 +33,9 @@ def main():
     # -------------------------
     # Output dir
     # -------------------------
-    model_bank_directory = args.out_dir
-    os.makedirs(model_bank_directory, exist_ok=True)
+    model_bank_directory = Path(args.out_dir)
+    if not os.path.exists(model_bank_directory):
+        os.makedirs(model_bank_directory, exist_ok=True)
 
     # -------------------------
     # Spark
@@ -142,10 +145,9 @@ def main():
     # -------------------------
     # Save artifact
     # -------------------------
-    model_name = "model_lr"
     model_artefact = {
         "model": best_model,
-        "model_version": f"{model_name}_{config['model_train_date_str'].replace('-', '_')}",
+        "model_version": f"{args.model_name}_{config['model_train_date_str'].replace('-', '_')}",
         "preprocessing_transformers": {"stdscaler": transformer_stdscaler},
         "data_dates": config,
         "data_stats": {
@@ -195,7 +197,7 @@ def main():
     # -------------------------------
     # Save artefact to model bank
     # -------------------------------
-    file_path = os.path.join(model_bank_directory, model_artefact["model_version"] + ".pkl")
+    file_path = os.path.join(model_bank_directory, model_artefact['model_version'] + '.pkl')
     with open(file_path, "wb") as f:
         pickle.dump(model_artefact, f)
     print(f"Model saved to {file_path}")

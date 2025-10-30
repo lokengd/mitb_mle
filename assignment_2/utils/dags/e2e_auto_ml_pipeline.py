@@ -137,7 +137,7 @@ with DAG(
         "prod_model_name": "prod_model",
         "prod_model_alias": "prod_model.pkl",
         "feature_store": FEATURE_STORE,
-        "label_store": LABEL_STORE+"primary",
+        "label_store": LABEL_STORE,
         "model_bank": MODEL_BANK,
         "deployment_dir": DEPLOYMENT_DIR,
         "pred_store": PRED_STORE,
@@ -341,6 +341,7 @@ with DAG(
                     python /opt/airflow/scripts/train_deploy/{model}_training.py \
                     --snapshot-date "{{{{ds}}}}" \
                     --out-dir "{{{{params.model_bank}}}}" \
+                    --model-name "{model}" \
                     --features {{{{params.features}}}} \
                     """.strip(),       
                 execution_timeout=timedelta(hours=1),
@@ -407,10 +408,11 @@ with DAG(
     # ------------------------------
     # INFERENCE 
     # ------------------------------
-    inference_gate = ShortCircuitOperator(
+   
+    inference_gate = BranchPythonOperator(
         task_id="inference_gate",
-        python_callable=should_infer
-    )    
+        python_callable=lambda **ctx: "batch_inference" if should_infer(**ctx) else "skip_inference",
+    )
 
     with TaskGroup("batch_inference") as batch_inference:        
         # -------------------------------------------------
@@ -454,6 +456,8 @@ with DAG(
         retrieve_features >> infer_prod_model
         # check_prod_model >> retrieve_features >> infer_prod_model
     
+    skip_inference = DummyOperator(task_id="skip_inference")
+
     # ------------------------------
     # MONITORING
     # ------------------------------
@@ -516,7 +520,7 @@ with DAG(
                         --snapshot-date "{{{{ds}}}}" \
                         --model-name "{model}" \
                         --pred-file "{{{{params.pred_store}}}}{model}_predictions_{{{{ds | replace('-', '_')}}}}.parquet" \
-                        --label-file "{{{{ params.label_store }}}}gold_lms_loan_daily_{{{{add_months(ds, 6)}}}}.parquet" \
+                        --label-file "{{{{ params.label_store }}}}primary/gold_lms_loan_daily_{{{{add_months(ds, 6)}}}}.parquet" \
                         --out-dir "{{{{params.monitor_store}}}}performance" \
                         --history-file "{{{{params.monitor_store}}}}performance/performance_history.parquet" \
                         --period-tag "PROD"
@@ -706,10 +710,11 @@ with DAG(
 
     data_pipeline >> train_gate 
     data_pipeline >> inference_gate >> batch_inference >> monitoring >> retrain_gate
+    inference_gate >> skip_inference
     train_gate >> training 
     train_gate >> skip_training
     retrain_gate >> [retraining, skip_retraining]
     retraining >> alert_retraining 
-    [training, retraining] >> deploy_gate
     skip_retraining >> alert_skip_retraining
+    [training, retraining] >> deploy_gate
     deploy_gate >> model_deployment
