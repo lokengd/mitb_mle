@@ -12,8 +12,9 @@ from airflow.operators.dummy import DummyOperator
 from airflow.models.baseoperator import cross_downstream
 from airflow.operators.python import ShortCircuitOperator
 
-from scripts.config import FEATURE_STORE, LABEL_STORE, MODEL_BANK, DEPLOYMENT_DIR, PRED_STORE, MONITOR_STORE, raw_data_file
-from train_deploy.etl import select_features_str
+from scripts.config import FEATURE_STORE, LABEL_STORE, MODEL_BANK, DEPLOYMENT_DIR, PRED_STORE, MONITOR_STORE, RETRAINING_DIR, raw_data_file
+from train_deploy.etl import select_features_str, save_history_json
+from mlops.thresholds import PERF_THRESHOLDS, STABILITY_THRESHOLDS
 
 def add_months(ds: str, months: int, fmt: str = "%Y_%m_%d"):
     # ds is "YYYY-MM-DD"
@@ -142,18 +143,14 @@ with DAG(
         "deployment_dir": DEPLOYMENT_DIR,
         "pred_store": PRED_STORE,
         "monitor_store": MONITOR_STORE,
+        "retraining_dir": RETRAINING_DIR,
         # features used for training
         "features": select_features_str(),
         # monitoring
-        "perf_thresholds": {  # performance guardrails (applied when labels exist)
-            "auc_min": 0.62,
-            "gini_min": 0.24,
-            "accuracy_min": 0.70,
-            "logloss_max": 0.60
-        },
-        "psi_warn": 0.10,
-        "psi_alert": 0.25,                               # population score drift (PSI) alert threshold
-        "csi_alert": 0.25,                               # feature drift (CSI) alert threshold (max across features)
+        "perf_thresholds": PERF_THRESHOLDS,
+        "psi_warn": STABILITY_THRESHOLDS["psi_warn"],
+        "psi_alert": STABILITY_THRESHOLDS["psi_alert"],  
+        "csi_alert": STABILITY_THRESHOLDS["csi_alert"],                               
         "csi_features": select_features_str(), # should be a subset of params.features
         "perf_history_path": f"{MONITOR_STORE}performance/performance_history.parquet",
         "stability_history_path": f"{MONITOR_STORE}stability/stability_history.parquet",
@@ -166,7 +163,7 @@ with DAG(
             "train_last_allowed": "2024-09-01",
             "infer_start_allowed": "2024-10-01",
             "monitor_start_allowed": "2024-10-01",
-            "retrain_last_allowed": "2024-10-01"
+            "retrain_last_allowed": "2024-11-01"
         },
         "period_tag": None, # "TRAIN | TEST | OOT | PROD" or None
     },
@@ -408,9 +405,8 @@ with DAG(
     # ------------------------------
     # INFERENCE 
     # ------------------------------
-   
-    inference_gate = BranchPythonOperator(
-        task_id="inference_gate",
+    infer_gate = BranchPythonOperator(
+        task_id="infer_gate",
         python_callable=lambda **ctx: "batch_inference" if should_infer(**ctx) else "skip_inference",
     )
 
@@ -461,21 +457,17 @@ with DAG(
     # ------------------------------
     # MONITORING
     # ------------------------------
+    monitor_gate = ShortCircuitOperator(
+        task_id="monitor_gate",
+        python_callable=should_monitor,
+    )
+    
     with TaskGroup("monitoring") as monitoring:
-        # -------------------------------------------------------------------------
-        # 1. Start
-        # -------------------------------------------------------------------------
-        check_monitor_conditions = ShortCircuitOperator(
-            task_id="check_monitor_conditions",
-            python_callable=should_monitor,
-        )
-
         models_monitoring = []
         for model in dag.params["prod_models"]: 
             with TaskGroup(group_id=f"{model}_monitoring", tooltip=f"Monitoring for {model}") as g:
-
                 # ----------------------------------------------------------
-                # 2.1. Ensure predictions are present before running any monitoring
+                # 1. Ensure predictions are present before running any monitoring
                 # ----------------------------------------------------------
                 check_predictions = FileSensor(
                     task_id="check_predictions",
@@ -487,7 +479,7 @@ with DAG(
                 )
 
                 # ----------------------------------------------------------
-                # 2.2. Stability monitoring - no labels: PSI/CSI (features & scores), drift alerts
+                # 2. Stability monitoring - no labels: PSI/CSI (features & scores), drift alerts
                 # ----------------------------------------------------------
                 stability_monitoring = BashOperator(
                     task_id=f"{model}_stability_monitoring",
@@ -507,10 +499,10 @@ with DAG(
                 )
 
                 # ----------------------------------------------------------
-                # 2.3. Performance monitoring (T+label_latency) sincd mob=6, needs to get labels at 6 months later
+                # 3. Performance monitoring (T+label_latency) sincd mob=6, needs to get labels at 6 months later
                 # ----------------------------------------------------------
                 """
-                Primary labels mature at P+6M; Current ds = 2024-10-01, so L + 6M = 2025-04-01    
+                Primary labels mature at P+6M; Current ds = 2024-10-01, so ds + 6M = 2025-04-01    
                 """
                 perf_monitoring = BashOperator(
                     task_id=f"{model}_perf_monitoring",
@@ -533,7 +525,7 @@ with DAG(
             models_monitoring.append(g)
 
         # --------------------------------------------
-        # 4. Visualization
+        # Visualization
         # --------------------------------------------
         monitoring_charts = []
         for model in dag.params["prod_models"]: 
@@ -567,14 +559,10 @@ with DAG(
             
             monitoring_charts.append(g)
 
-
         # -------------------------------------------------
         # 5. End task
         # -------------------------------------------------
         monitoring_completed = DummyOperator(task_id="monitoring_completed")
-
-        # task chaining
-        check_monitor_conditions >> models_monitoring  # task >> [list] is allowed
 
         # connect every monitoring task to every chart task
         cross_downstream(models_monitoring, monitoring_charts)  # [list] -> [list]
@@ -584,25 +572,40 @@ with DAG(
             chart >> monitoring_completed  # [list] >> task (via loop)
 
     # ------------------------------
-    # DECISION FOR RETRAINING
+    # RETRAINING
     # ------------------------------
     def _decide_retrain(**context):
         import pandas as pd
         from pathlib import Path
+        
         params = context["params"]
         ds_str = context["ds"]   # 'YYYY-MM-DD'
-        month_key = context["execution_date"].format("YYYY-MM")
+        period_month = (context["execution_date"] - relativedelta(months=1)).format("YYYY-MM") # period month is one month earlier than dagrun logical month. A run at logical date 2024-11-01 will give 2024-10.
         prod_model = params["prod_model_name"]
         perf_thr = params["perf_thresholds"]
         psi_alert = float(params["psi_alert"])
         csi_alert = float(params["csi_alert"])
-
+        retraining_dir = params["retraining_dir"]
         perf_hist_path = Path(params["perf_history_path"])
         stability_hist_path = Path(params["stability_history_path"])
 
+        if not os.path.exists(retraining_dir):
+            os.makedirs(retraining_dir)
+
+        history_file = f"retraining_history_{ds_str.replace('-','_')}.json"
+        
+        # First check: logical dates or dataset
+        if not should_retrain(**context):
+            record = {
+                "snapshot_date": ds_str, 
+                "retraining": False, 
+                "reason": f"Retraining not allowed. Either logical date < {params['datasets']['retrain_last_allowed']} or dataset not found."}
+            save_history_json(record, os.path.join(retraining_dir, history_file))
+            return "skip_retraining"  
+        
+        # Second check: performance and stability
         perf_bad = False
         reasons = []
-
         # check performance only if we have a row for this ds with labels (period_tag=PROD)
         if perf_hist_path.exists():
             pdf = pd.read_parquet(perf_hist_path)
@@ -626,7 +629,7 @@ with DAG(
         drift_bad = False
         if stability_hist_path.exists():
             s = pd.read_parquet(stability_hist_path)
-            s = s[(s["model_name"] == prod_model) & (s["month"] == month_key)]
+            s = s[(s["model_name"] == prod_model) & (s["period_month"] == period_month)]
             if not s.empty:
                 # PSI for score (type == 'PSI', feature == 'model_predictions')
                 psi_row = s[(s["type"] == "PSI")]
@@ -645,36 +648,30 @@ with DAG(
 
         # Decide per configured policy
         policy = set([x.upper() for x in params.get("retrain_on", ["PERF_BELOW", "PSI_ALERT", "CSI_ALERT"])])
-        should = (("PERF_BELOW" in policy and perf_bad) or
-                  ("PSI_ALERT" in policy and drift_bad) or
-                  ("CSI_ALERT" in policy and drift_bad))
+        bad_result = (("PERF_BELOW" in policy and perf_bad) or
+                    ("PSI_ALERT" in policy and drift_bad) or
+                    ("CSI_ALERT" in policy and drift_bad))
 
         msg = "; ".join(reasons) if reasons else "No thresholds breached or no label yet."
-        print(f"Retrain decision: {'retraining' if should else 'skip_retraining'}, reason={msg}")
-        context["ti"].xcom_push(key="retrain_needed", value=bool(should))
-        context["ti"].xcom_push(key="reason", value=msg)
-        return "retraining" if should else "skip_retraining"
-
+        print(f"Retrain decision: {'retraining' if bad_result else 'skip_retraining'}, reason={msg}")
+        record = {"snapshot_date": ds_str, "retraining": bool(bad_result), "reason": msg}
+        save_history_json(record, os.path.join(retraining_dir, history_file))
+        # context["ti"].xcom_push(key="retrain_needed", value=bool(should))
+        # context["ti"].xcom_push(key="reason", value=msg)
+        return "retraining" if bad_result else "skip_retraining"
+    
     retrain_gate = BranchPythonOperator(
         task_id="retrain_gate", 
         python_callable=_decide_retrain,
         provide_context=True  # this is needed to get kwargs
     )
 
-    # ------------------------------
-    # RETRAINING 
-    # ------------------------------
     with TaskGroup("retraining") as retraining:
         """
         Sliding window of K months for dataset used for retraining. 
         Last model trained with L_old, the new retrain uses L_new = L_old + k months. 
         That brings in k months of new labeled data and drops the oldest k months -> to address drift problem.
         """        
-        check_retrain_conditions = ShortCircuitOperator(
-            task_id="check_retrain_conditions",
-            python_callable=should_retrain,
-        )    
-
         models_retraining = []
         for model in dag.params["models"]: 
 
@@ -690,8 +687,6 @@ with DAG(
             )
 
             models_retraining.append(retrain_model)
-
-        check_retrain_conditions >> models_retraining
 
     skip_retraining = DummyOperator(task_id="skip_retraining")
 
@@ -709,8 +704,8 @@ with DAG(
     check_data_lms >> bronze_lms >> silver_lms >> gold_datamart >> feature_store_completed 
 
     data_pipeline >> train_gate 
-    data_pipeline >> inference_gate >> batch_inference >> monitoring >> retrain_gate
-    inference_gate >> skip_inference
+    data_pipeline >> infer_gate >> batch_inference >> monitor_gate >> monitoring >> retrain_gate
+    infer_gate >> skip_inference
     train_gate >> training 
     train_gate >> skip_training
     retrain_gate >> [retraining, skip_retraining]

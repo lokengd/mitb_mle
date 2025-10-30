@@ -6,6 +6,7 @@ import pandas as pd
 import matplotlib.pyplot as plt
 from matplotlib.dates import MonthLocator, DateFormatter
 import pyspark
+from mlops.thresholds import STABILITY_THRESHOLDS
 
 def _to_month_dt(month_str_series: pd.Series) -> pd.Series:
     # parse "YYYY-MM" to a month-start datetime for nice x-axis ticks
@@ -57,7 +58,7 @@ def main():
 
     # normalize month to datetime for plotting, but also keep a pretty label
     df = df.copy()
-    df["month_dt"] = _to_month_dt(df["month"].astype(str))
+    df["month_dt"] = _to_month_dt(df["period_month"].astype(str))
     df["month_label"] = df["month_dt"].dt.strftime("%Y-%m")
 
     # -------------------------
@@ -72,11 +73,12 @@ def main():
             ax.xaxis.set_major_locator(MonthLocator(interval=1))
             ax.xaxis.set_major_formatter(DateFormatter("%Y-%m"))
             plt.xticks(rotation=45, ha="right")
-            plt.axhline(0.10, linestyle="--")
-            plt.axhline(0.25, linestyle="--")
-            plt.title(f"PSI over time — {m}")
+            plt.axhline(STABILITY_THRESHOLDS["psi_warn"], linestyle="--", color="orange", label="Warning")
+            plt.axhline(STABILITY_THRESHOLDS["psi_alert"], linestyle="--", color="red", label="Alert")
+            plt.title(f"PSI over time - {m}")
             plt.ylabel("PSI")
-            plt.xlabel("Month")
+            plt.xlabel("Period Month")
+            plt.legend(ncol=2)
             plt.tight_layout()
             path = os.path.join(out_dir, f"psi_{m}_{args.snapshot_date.replace('-','_')}.png")
             plt.savefig(path); plt.close()
@@ -94,11 +96,12 @@ def main():
             ax.xaxis.set_major_locator(MonthLocator(interval=1))
             ax.xaxis.set_major_formatter(DateFormatter("%Y-%m"))
             plt.xticks(rotation=45, ha="right")
-            plt.axhline(0.10, linestyle="--")
-            plt.axhline(0.25, linestyle="--")
-            plt.title(f"CSI over time — {mname} — {feat}")
+            plt.axhline(STABILITY_THRESHOLDS["csi_warn"], linestyle="--", color="orange", label="Warning")
+            plt.axhline(STABILITY_THRESHOLDS["csi_alert"], linestyle="--", color="red", label="Alert")
+            plt.title(f"CSI over time - {mname} - {feat}")
             plt.ylabel("CSI")
-            plt.xlabel("Month")
+            plt.xlabel("Period Month")
+            plt.legend(ncol=2)
             plt.tight_layout()
             safe_feat = str(feat).replace("/", "_").replace(" ", "_")
             path = os.path.join(out_dir, f"csi_{mname}_{safe_feat}_{args.snapshot_date.replace('-','_')}.png")
@@ -121,12 +124,12 @@ def main():
             ax.xaxis.set_major_locator(MonthLocator(interval=1))
             ax.xaxis.set_major_formatter(DateFormatter("%Y-%m"))
             plt.xticks(rotation=45, ha="right")
-            plt.axhline(0.10, linestyle="--")
-            plt.axhline(0.25, linestyle="--")
+            plt.axhline(STABILITY_THRESHOLDS["csi_warn"], linestyle="--", color="orange", label="Warning")
+            plt.axhline(STABILITY_THRESHOLDS["csi_alert"], linestyle="--", color="red", label="Alert")
             title_model = args.model_name if args.model_name else "all_models"
             plt.title(f"CSI over time — top-{len(topk_feats)} features — {title_model}")
             plt.ylabel("CSI")
-            plt.xlabel("Month")
+            plt.xlabel("Period Month")
             plt.legend(ncol=2)
             plt.tight_layout()
             path = os.path.join(out_dir, f"csi_top{len(topk_feats)}_{title_model}_{args.snapshot_date.replace('-','_')}.png")

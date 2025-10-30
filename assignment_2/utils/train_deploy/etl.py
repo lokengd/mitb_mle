@@ -15,7 +15,7 @@ FEATURES_1_0 = FEATURES_0 + ['fe_1', 'fe_2', 'fe_3', 'fe_4', 'fe_5'] # clickstre
 FEATURES_1_1 = FEATURES_0_1 + ['fe_1', 'fe_2', 'fe_3', 'fe_4', 'fe_5']
 FEATURES_1_2 = FEATURES_0_2 + ['fe_1', 'fe_2', 'fe_3', 'fe_4', 'fe_5']
 def get_default_feature_list():
-    return FEATURES_0 # Default
+    return FEATURES_0_1 # Default
 
 def select_features_str(features=None):
     if not features: features = get_default_feature_list() 
@@ -174,8 +174,8 @@ def load_dataset_mob_0(spark, start_date, end_date, features=[]):
     dataset_pdf = dataset_sdf.toPandas()
     print("dataset_pdf.shape",dataset_pdf.shape)
     dataset_pdf = dataset_pdf.dropna(subset=feature_cols, how="all")
-    null_counts = dataset_pdf.isnull().sum() # Show NULL counts per column
-    print("Null counts per column:\n", null_counts)
+    # null_counts = dataset_pdf.isnull().sum() # Show NULL counts per column
+    # print("Null counts per column:\n", null_counts)
     # print(dataset_pdf.head(10))
 
     return dataset_pdf, features_sdf, feature_cols

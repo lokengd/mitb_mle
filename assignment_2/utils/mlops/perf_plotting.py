@@ -6,6 +6,7 @@ import pandas as pd
 import matplotlib.pyplot as plt
 import pyspark
 import matplotlib.dates as mdates
+from mlops.thresholds import PERF_MERTRICS
 
 def plot_perf_metric(df, metric, out_dir, snapshot_date_str, period=None):
     plt.figure()
@@ -14,11 +15,13 @@ def plot_perf_metric(df, metric, out_dir, snapshot_date_str, period=None):
 
     # convert to datetime, truncate to month
     df = df.copy()
-    df["snapshot_date"] = pd.to_datetime(df["snapshot_date"]).dt.to_period("M").dt.to_timestamp()
-    df = df.sort_values("snapshot_date")
+    # df["snapshot_date"] = pd.to_datetime(df["snapshot_date"]).dt.to_period("M").dt.to_timestamp()
+    # df = df.sort_values("snapshot_date")
+    df["period_month"] = pd.to_datetime(df["period_month"]).dt.to_period("M").dt.to_timestamp()
+    df = df.sort_values("period_month")
 
     for model, g in df.groupby("model_name"):
-        plt.plot(g["snapshot_date"], g[metric], marker="o", label=model)
+        plt.plot(g["period_month"], g[metric], marker="o", label=model)
 
     # set monthly ticks
     ax = plt.gca()
@@ -26,9 +29,11 @@ def plot_perf_metric(df, metric, out_dir, snapshot_date_str, period=None):
     ax.xaxis.set_major_formatter(mdates.DateFormatter("%Y-%m"))  # format YYYY-MM
 
     plt.xticks(rotation=45, ha="right")
+    if metric in PERF_MERTRICS:
+        plt.axhline(PERF_MERTRICS[metric], linestyle="--", color="red", label="Threshold")
     plt.title(f"{metric} over time (monthly)")
     plt.ylabel(metric)
-    plt.xlabel("Snapshot Month")
+    plt.xlabel("Period Month")
     plt.legend()
     plt.tight_layout()
 
@@ -75,7 +80,7 @@ def main():
         else:
             raise SystemExit(f"Performance history file not found: {history_file}")
         
-        metrics = ["auc", "logloss", "accuracy", "gini","n_rows"]
+        metrics = ["auc", "logloss", "accuracy", "gini", "n_rows"]
         for metric in metrics:
             plot_perf_metric(perf_hist_sdf, metric, out_dir, snapshot_date_str=args.snapshot_date.replace('-','_'), period=args.period_tag)
 

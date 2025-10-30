@@ -9,6 +9,7 @@ MODEL_BANK = f"{DATAMART}/model_bank/"
 PRED_STORE = f"{DATAMART}/gold/predictions/"
 MONITOR_STORE = f"{DATAMART}/gold/monitoring/"
 DEPLOYMENT_DIR = f"{DATAMART}/deployment/"
+RETRAINING_DIR = f"{DATAMART}/retraining/"
 
 import os
 raw_data_file = {
