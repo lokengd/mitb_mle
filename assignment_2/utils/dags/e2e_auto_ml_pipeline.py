@@ -13,6 +13,7 @@ from airflow.models.baseoperator import cross_downstream
 from airflow.operators.python import ShortCircuitOperator
 
 from scripts.config import FEATURE_STORE, LABEL_STORE, MODEL_BANK, DEPLOYMENT_DIR, PRED_STORE, MONITOR_STORE, raw_data_file
+from train_deploy.etl import select_features_str
 
 def add_months(ds: str, months: int, fmt: str = "%Y_%m_%d"):
     # ds is "YYYY-MM-DD"
@@ -81,7 +82,7 @@ def should_infer(**context):
     """
     ds = pendulum.parse(context["ds"]).date()
     params = context["params"]
-    start_allowed =params['datasets']['infer_start_allowed']
+    start_allowed = params['datasets']['infer_start_allowed']
     start_date = pendulum.parse(start_allowed).date()
 
     if ds < start_date:
@@ -95,6 +96,21 @@ def should_infer(**context):
 
     print(f"Check dataset {mm} -> [{feature_ok}] feature:{feature_file}")        
     return bool(feature_ok)
+
+def should_monitor(**context):
+    """
+    Return True only after start_allowed and has the feature parquet present.
+    """
+    ds = pendulum.parse(context["ds"]).date()
+    params = context["params"]
+    start_allowed = params['datasets']['monitor_start_allowed']
+    start_date = pendulum.parse(start_allowed).date()
+
+    if ds < start_date:
+        print(f"Monitoring not allowed. Need logical date >= {start_allowed}, got {ds}")
+        return False
+
+    return True
 
 DAG_ID="e2e_auto_ml_pipeline"
 default_args = {
@@ -126,9 +142,9 @@ with DAG(
         "deployment_dir": DEPLOYMENT_DIR,
         "pred_store": PRED_STORE,
         "monitor_store": MONITOR_STORE,
+        # features used for training
+        "features": select_features_str(),
         # monitoring
-        "ref_windows": ["2024_08_01", "2024_09_01"],   # 2 months OOT data as reference for monitoring
-        # For retraining
         "perf_thresholds": {  # performance guardrails (applied when labels exist)
             "auc_min": 0.62,
             "gini_min": 0.24,
@@ -138,17 +154,19 @@ with DAG(
         "psi_warn": 0.10,
         "psi_alert": 0.25,                               # population score drift (PSI) alert threshold
         "csi_alert": 0.25,                               # feature drift (CSI) alert threshold (max across features)
-        "csi_features": 'fe_1 fe_2 fe_3',
+        "csi_features": select_features_str(), # should be a subset of params.features
         "perf_history_path": f"{MONITOR_STORE}performance/performance_history.parquet",
         "stability_history_path": f"{MONITOR_STORE}stability/stability_history.parquet",
         "retrain_deploy_dag_id": "retrain_deploy_pipeline",  # DAG that trains both models + selects + deploys
         # Controls the range of datasets for training/retraining
+        "ref_windows": ["2024_08_01", "2024_09_01"],   # 2 months OOT data as reference for monitoring
         "datasets": {
             "train_total_months": 14,
             "train_oot_months": 2,
             "train_last_allowed": "2024-09-01",
-            "retrain_last_allowed": "2024-10-01",
-            "infer_start_allowed": "2024-10-01"
+            "infer_start_allowed": "2024-10-01",
+            "monitor_start_allowed": "2024-10-01",
+            "retrain_last_allowed": "2024-10-01"
         },
         "period_tag": None, # "TRAIN | TEST | OOT | PROD" or None
     },
@@ -323,6 +341,7 @@ with DAG(
                     python /opt/airflow/scripts/train_deploy/{model}_training.py \
                     --snapshot-date "{{{{ds}}}}" \
                     --out-dir "{{{{params.model_bank}}}}" \
+                    --features {{{{params.features}}}} \
                     """.strip(),       
                 execution_timeout=timedelta(hours=1),
             )
@@ -397,14 +416,14 @@ with DAG(
         # -------------------------------------------------
         # 1. Check dependencies: model file exists
         # -------------------------------------------------
-        check_prod_model = FileSensor(
-            task_id="check_prod_model",
-            fs_conn_id="fs_default",   
-            filepath=f"""{{{{params.deployment_dir}}}}{{{{params.prod_model_name}}}}.pkl""".strip(),
-            poke_interval=60,           
-            timeout=60 * 60,          
-            mode="reschedule",      
-        )
+        # check_prod_model = FileSensor(
+        #     task_id="check_prod_model",
+        #     fs_conn_id="fs_default",   
+        #     filepath=f"""{{{{params.deployment_dir}}}}{{{{params.prod_model_name}}}}.pkl""".strip(),
+        #     poke_interval=60,           
+        #     timeout=60 * 60,          
+        #     mode="reschedule",      
+        # )
 
         retrieve_features = FileSensor(
             task_id="retrieve_features",
@@ -426,11 +445,14 @@ with DAG(
                 --model-name "{{{{params.prod_model_name}}}}" \
                 --deployment-dir "{{{{params.deployment_dir}}}}" \
                 --out-dir "{{{{params.pred_store}}}}" \
+                --features {{{{params.features}}}} \
+                --start-allowed "{{{{params.datasets.infer_start_allowed}}}}" \
                 """.strip(),
             execution_timeout=timedelta(hours=1),
         )
 
-        check_prod_model >> retrieve_features >> infer_prod_model
+        retrieve_features >> infer_prod_model
+        # check_prod_model >> retrieve_features >> infer_prod_model
     
     # ------------------------------
     # MONITORING
@@ -439,7 +461,10 @@ with DAG(
         # -------------------------------------------------------------------------
         # 1. Start
         # -------------------------------------------------------------------------
-        monitoring_start = DummyOperator(task_id="monitoring_start")
+        check_monitor_conditions = ShortCircuitOperator(
+            task_id="check_monitor_conditions",
+            python_callable=should_monitor,
+        )
 
         models_monitoring = []
         for model in dag.params["prod_models"]: 
@@ -451,7 +476,7 @@ with DAG(
                 check_predictions = FileSensor(
                     task_id="check_predictions",
                     fs_conn_id="fs_default",
-                    filepath=f"""{{{{params.pred_store}}}}{model}/{model}_predictions_{{{{ds | replace('-', '_')}}}}.parquet""".strip(),
+                    filepath=f"""{{{{params.pred_store}}}}{model}_predictions_{{{{ds | replace('-', '_')}}}}.parquet""".strip(),
                     poke_interval=60,
                     timeout=60 * 60,
                     mode="reschedule",
@@ -469,8 +494,8 @@ with DAG(
                         --ref-features {{{{params.feature_store}}}}gold_features_{{{{params.ref_windows[0]}}}}.parquet {{{{params.feature_store}}}}gold_features_{{{{params.ref_windows[1]}}}}.parquet \
                         --cur-features {{{{params.feature_store}}}}gold_features_{{{{ds | replace('-', '_')}}}}.parquet \
                         --features {{{{params.csi_features}}}} \
-                        --ref-pred {{{{params.pred_store}}}}{model}/{model}_predictions_{{{{params.ref_windows[0]}}}}.parquet {{{{params.pred_store}}}}{model}/{model}_predictions_{{{{params.ref_windows[1]}}}}.parquet \
-                        --cur-pred {{{{params.pred_store}}}}{model}/{model}_predictions_{{{{ds | replace('-', '_')}}}}.parquet \
+                        --ref-pred {{{{params.pred_store}}}}{model}_predictions_{{{{params.ref_windows[0]}}}}.parquet {{{{params.pred_store}}}}{model}_predictions_{{{{params.ref_windows[1]}}}}.parquet \
+                        --cur-pred {{{{params.pred_store}}}}{model}_predictions_{{{{ds | replace('-', '_')}}}}.parquet \
                         --pred-col model_predictions \
                         --out-dir {{{{params.monitor_store}}}}stability \
                         """.strip(), 
@@ -478,8 +503,11 @@ with DAG(
                 )
 
                 # ----------------------------------------------------------
-                # 2.3. Performance monitoring (T+label_latency) sincd mob=6, needs wait for 6 months later?
+                # 2.3. Performance monitoring (T+label_latency) sincd mob=6, needs to get labels at 6 months later
                 # ----------------------------------------------------------
+                """
+                Primary labels mature at P+6M; Current ds = 2024-10-01, so L + 6M = 2025-04-01    
+                """
                 perf_monitoring = BashOperator(
                     task_id=f"{model}_perf_monitoring",
                     # Note of macros.relativedelta(months=6) to support label latency due to mob=6 for live performance monitoring
@@ -487,8 +515,8 @@ with DAG(
                         python /opt/airflow/scripts/mlops/perf_monitoring.py \
                         --snapshot-date "{{{{ds}}}}" \
                         --model-name "{model}" \
-                        --pred-file "{{{{params.pred_store}}}}{model}/{model}_predictions_{{{{ds | replace('-', '_')}}}}.parquet" \
-                        --label-file "{{{{ params.label_store }}}}primary/gold_lms_loan_daily_{{{{add_months(ds, 6)}}}}.parquet" \
+                        --pred-file "{{{{params.pred_store}}}}{model}_predictions_{{{{ds | replace('-', '_')}}}}.parquet" \
+                        --label-file "{{{{ params.label_store }}}}gold_lms_loan_daily_{{{{add_months(ds, 6)}}}}.parquet" \
                         --out-dir "{{{{params.monitor_store}}}}performance" \
                         --history-file "{{{{params.monitor_store}}}}performance/performance_history.parquet" \
                         --period-tag "PROD"
@@ -542,7 +570,7 @@ with DAG(
         monitoring_completed = DummyOperator(task_id="monitoring_completed")
 
         # task chaining
-        monitoring_start >> models_monitoring  # task >> [list] is allowed
+        check_monitor_conditions >> models_monitoring  # task >> [list] is allowed
 
         # connect every monitoring task to every chart task
         cross_downstream(models_monitoring, monitoring_charts)  # [list] -> [list]
@@ -632,18 +660,12 @@ with DAG(
     # ------------------------------
     # RETRAINING 
     # ------------------------------
-    """
-    Sliding window of K months for dataset used for retraining. 
-    Last model trained with L_old, the new retrain uses L_new = L_old + k months. 
-    That brings in k months of new labeled data and drops the oldest k months -> to address drift problem.
-
-    Perf monitoring:
-    Trigger retraining on production month P. Primary labels mature at P+6M, 
-    so the latest month with labels that can be trained on is L = P - 6M.
-    P_min = 2024-10-01, so L + 6M = 2025-04-01    
-    """    
     with TaskGroup("retraining") as retraining:
-        
+        """
+        Sliding window of K months for dataset used for retraining. 
+        Last model trained with L_old, the new retrain uses L_new = L_old + k months. 
+        That brings in k months of new labeled data and drops the oldest k months -> to address drift problem.
+        """        
         check_retrain_conditions = ShortCircuitOperator(
             task_id="check_retrain_conditions",
             python_callable=should_retrain,
@@ -658,6 +680,7 @@ with DAG(
                     python /opt/airflow/scripts/train_deploy/{model}_training.py \
                     --snapshot-date "{{{{ds}}}}" \
                     --out-dir "{{{{params.model_bank}}}}" \
+                    --features {{{{params.features}}}} \
                     """.strip(),       
                 execution_timeout=timedelta(hours=1),
             )

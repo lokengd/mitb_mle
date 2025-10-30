@@ -15,16 +15,18 @@ from sklearn.model_selection import train_test_split, RandomizedSearchCV
 from sklearn.preprocessing import StandardScaler
 from sklearn.metrics import make_scorer, roc_auc_score
 from sklearn.linear_model import LogisticRegression
+# import shap
 
-from train_deploy.etl import load_gold_features_date_range, load_gold_primary_labels
-
+from train_deploy.etl import load_dataset_mob_0, load_training_dataset, replace_NaN_column_with_0, parse_features, save_history_json
 
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--snapshot-date", type=str, required=True, help="YYYY-MM-DD")
     parser.add_argument("--out-dir", required=True, type=str)
+    parser.add_argument("--features", required=True, type=str, nargs="+", help="Features used for training")
     args = parser.parse_args()
     print("Arguments:", args)
+    print("args.features", args.features)
 
     # -------------------------
     # Output dir
@@ -60,58 +62,22 @@ def main():
     pprint.pprint(config)
 
     # -------------------------
-    # Load labels & features
+    # Get training dataset
     # -------------------------
-    labels_sdf = load_gold_primary_labels(spark, config["train_test_start_date"], config["oot_end_date"])
-    features_sdf = load_gold_features_date_range(spark, config["train_test_start_date"], config["oot_end_date"])
-
-    # -------------------------
-    # Join & split
-    # -------------------------
-    data_pdf = (
-        labels_sdf.join(features_sdf, on=["Customer_ID", "snapshot_date"], how="left")
-        .toPandas()
-    )
-
-    oot_pdf = data_pdf[
-        (data_pdf["snapshot_date"] >= config["oot_start_date"].date())
-        & (data_pdf["snapshot_date"] <= config["oot_end_date"].date())
-    ]
-    train_test_pdf = data_pdf[
-        (data_pdf["snapshot_date"] >= config["train_test_start_date"].date())
-        & (data_pdf["snapshot_date"] <= config["train_test_end_date"].date())
-    ]
-
-    feature_cols = [c for c in data_pdf.columns if c.startswith("fe_") and c != "fe_1_avg_3m"]
-    print("feature_cols:", feature_cols)
-
-    X_oot = oot_pdf[feature_cols]
-    y_oot = oot_pdf["label"]
-
-    # NOTE: This is the same random 80/20 split you used; if you want strict temporal split,
-    # replace with the month-based slice you already commented in the XGB script.
-    X_train, X_test, y_train, y_test = train_test_split(
-        train_test_pdf[feature_cols],
-        train_test_pdf["label"],
-        test_size=1 - config["train_test_ratio"],
-        random_state=88,
-        shuffle=True,
-        stratify=train_test_pdf["label"],
-    )
-
-    print("X_train", X_train.shape[0])
-    print("X_test", X_test.shape[0])
-    print("X_oot", X_oot.shape[0])
-    print("y_train", y_train.shape[0], round(float(y_train.mean()), 2))
-    print("y_test", y_test.shape[0], round(float(y_test.mean()), 2))
-    print("y_oot", y_oot.shape[0], round(float(y_oot.mean()), 2))
+    features = parse_features(args.features) #Note args.featues is an array! 
+    dataset_pdf, features_sdf, feature_cols = load_dataset_mob_0(spark, config["train_test_start_date"], config["oot_end_date"], features)
+    # LogisticRegression does not accept missing values encoded as NaN natively.
+    dataset_pdf = replace_NaN_column_with_0(dataset_pdf, feature_cols)
+    X_train, X_test, X_oot, y_train, y_test, y_oot = load_training_dataset(dataset_pdf, feature_cols, config)
 
     # -------------------------
-    # Scale (fit on TRAIN only)
+    # Data preprocessing
     # -------------------------
+    # set up standard scalar preprocessing
     scaler = StandardScaler()
     transformer_stdscaler = scaler.fit(X_train)
 
+    # transform data
     X_train_processed = transformer_stdscaler.transform(X_train)
     X_test_processed = transformer_stdscaler.transform(X_test)
     X_oot_processed = transformer_stdscaler.transform(X_oot)
@@ -119,7 +85,7 @@ def main():
     # -------------------------
     # Logistic Regression + HPO
     # -------------------------
-    # Note: Search space sticks to liblinear so you can use L1/L2; 
+    # Note: Search space sticks to liblinear so that we can use L1/L2; 
     # For elastic-net, switch to solver="saga" and add l1_ratio in [0.0, 0.5, 1.0] (and penalty="elasticnet").
     lr = LogisticRegression(
         solver="liblinear",  # supports l1 & l2
@@ -203,19 +169,58 @@ def main():
 
     pprint.pprint(model_artefact)
 
+    # -------------------------------
+    # TODO SHAP Analysis (Logistic Regression) 
+    # ------------------------------- 
+    # shap_dir = os.path.join(model_bank_directory, "shap"); os.makedirs(shap_dir, exist_ok=True)
+
+    # # background = TRAIN (scaled)
+    # X_train_proc = transformer_stdscaler.transform(X_train)
+    # X_oot_proc   = transformer_stdscaler.transform(X_oot)      # or test
+
+    # explainer = shap.LinearExplainer(best_model, X_train_proc)
+    # shap_vals_oot = explainer.shap_values(X_oot_proc)
+
+    # mean_abs = np.abs(shap_vals_oot).mean(axis=0)
+    # shap_imp = pd.DataFrame({"feature": feature_cols, "mean_abs_shap": mean_abs}) \
+    #             .sort_values("mean_abs_shap", ascending=False)
+    # shap_imp.to_csv(os.path.join(shap_dir, "shap_importance_oot.csv"), index=False)
+
+    # plt.figure()
+    # shap.summary_plot(shap_vals_oot, X_oot_proc, feature_names=feature_cols, show=False)
+    # plt.tight_layout(); plt.savefig(os.path.join(shap_dir, "shap_summary_oot.png")); plt.close()
+
+    # model_artefact["explainability"] = {"mean_abs_shap_oot": shap_imp.to_dict(orient="records")}
+
+    # -------------------------------
+    # Save artefact to model bank
+    # -------------------------------
     file_path = os.path.join(model_bank_directory, model_artefact["model_version"] + ".pkl")
     with open(file_path, "wb") as f:
         pickle.dump(model_artefact, f)
     print(f"Model saved to {file_path}")
 
-    # quick load test
+    # -------------------------------
+    # Save model training results to model bank
+    # -------------------------------
+    history_file_path = os.path.join(model_bank_directory, model_artefact['model_version'] + '_history.json')
+    history = {
+            "features": features,
+            "results": model_artefact["results"],
+            "data_dates": model_artefact['data_dates'],
+            "data_stats": model_artefact['data_stats'],
+        }
+    save_history_json(history, history_file_path)
+
+    # ------------------------------------------
+    # Test load pickle and make model inference
+    # ------------------------------------------
     with open(file_path, "rb") as f:
         loaded = pickle.load(f)
     _ = loaded["model"].predict_proba(X_oot_processed)[:, 1]
     print("Pickle load test OK.")
 
     spark.stop()
-    print("\n\n---completed job---\n\n")
 
 
 if __name__ == "__main__":

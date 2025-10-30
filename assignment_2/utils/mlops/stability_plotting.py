@@ -19,7 +19,7 @@ def main():
     parser.add_argument("--model-name", required=True, type=str)
     parser.add_argument("--history-file", required=True, type=str)
     parser.add_argument("--out-dir", required=True, help="Output directory")
-    parser.add_argument("--top-k", required=False, default=5, help="top-K overlay chart")
+    parser.add_argument("--top-k", required=False, default=10, help="top-K overlay chart")
 
     args = parser.parse_args()
     print("Arguments:", args)
@@ -27,8 +27,8 @@ def main():
     # -------------------------
     # Prepare output directory
     # -------------------------
-    # using model_name as subdir
-    out_dir = Path(args.out_dir) / args.model_name 
+    # using snapshot_date as subdir
+    out_dir = Path(args.out_dir) / args.snapshot_date.replace('-','_') 
     if not os.path.exists(out_dir):
         os.makedirs(out_dir)
 

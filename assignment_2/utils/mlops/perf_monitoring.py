@@ -27,11 +27,11 @@ def _compute_logloss(y_true: np.ndarray, y_pred: np.ndarray):
     except Exception:
         return None
 
-def compute_metrics(sdf, labels_available=False) -> dict:
-    n_rows = sdf.count()
-    metrics = {"n_rows": sdf.count()}
+def compute_metrics(pred_sdf, labels_available=False) -> dict:
+    n_rows = pred_sdf.count()
+    metrics = {"n_rows": pred_sdf.count()}
     # always-available score stats, not require label
-    stats = sdf.select(
+    stats = pred_sdf.select(
         F.mean("model_predictions").alias("score_mean"),
         F.stddev("model_predictions").alias("score_std"),
         F.expr("percentile_approx(model_predictions, 0.5)").alias("score_median")
@@ -40,10 +40,10 @@ def compute_metrics(sdf, labels_available=False) -> dict:
 
     if labels_available:
         # Supervised metrics (need labels)
-        n_pos = sdf.agg(F.sum("label")).collect()[0][0]
+        n_pos = pred_sdf.agg(F.sum("label")).collect()[0][0]
         n_neg = n_rows - n_pos
 
-        pdf = sdf.select("label", "model_predictions").toPandas()
+        pdf = pred_sdf.select("label", "model_predictions").toPandas()
         y = pdf["label"].astype(int).values
         p = pdf["model_predictions"].astype(float).values
         y_hat = (p >= 0.5).astype(int) # threshold at 0.5, label predictions
@@ -83,30 +83,33 @@ def join_table_inner(spark, pred_path, label_path):
     if not os.path.exists(pred_path):
         raise FileNotFoundError(f"Predictions file not found: {pred_path}")
     
-    sdf  = spark.read.parquet(pred_path)
+    pred_sdf  = spark.read.parquet(pred_path)
 
     if os.path.exists(label_path):
-         # rename to label_date so that it does not clash with snapshot_date in sdf
-        labels = spark.read.parquet(label_path).select("Customer_ID", "snapshot_date", "label").withColumnRenamed("snapshot_date","label_date")
+        print(f"Label file found: {label_path}")
+        # rename to label_date so that it does not clash with snapshot_date in sdf
+        labels_sdf = spark.read.parquet(label_path).select("Customer_ID", "snapshot_date", "label").withColumnRenamed("snapshot_date","label_date")
 
         # Inner join on customer only
-        joined_sdf = sdf.join(labels, on=["Customer_ID"], how="inner")
+        joined_sdf = pred_sdf.join(labels_sdf, on=["Customer_ID"], how="inner")
         # Inner join on customer + snapshot date
-        # sdf = sdf.join(labels, on=["Customer_ID", "snapshot_date"], how="inner")
+        # pred_sdf = pred_sdf.join(labels, on=["Customer_ID", "snapshot_date"], how="inner")
         row_count = joined_sdf.count()
 
         print("Joined table count:", row_count)
         joined_sdf.show(10, truncate=False)
         if row_count == 0:
             labels_available = False
-            print("Joined table has no records, set labels_available=False")
+            print("WARN: Pred and label table have no joined records based on Customer_ID; set labels_available=False")
         else:
-            print("Joined table has records, set labels_available=True")
+            print("INFO: Pred and label table have joined records based on Customer_ID; set labels_available=True")
             labels_available = True
-            sdf = joined_sdf
+            pred_sdf = joined_sdf
+    else:
+        print(f"Label file not found: {label_path}")
 
 
-    return sdf, labels_available
+    return pred_sdf, labels_available
 
 def _append_to_history(history_path, model_name, snapshot_date_str, period_tag, scalars):
     """Append one row to a tidy Parquet history, creating it if missing."""
@@ -158,7 +161,8 @@ def main():
     # Prepare output directory
     # -------------------------
     # using model_name as subdir
-    out_dir = Path(args.out_dir) / args.model_name
+    # out_dir = Path(args.out_dir) / args.model_name
+    out_dir = Path(args.out_dir)
     if not os.path.exists(out_dir):
         os.makedirs(out_dir)
 
@@ -175,12 +179,12 @@ def main():
     # -------------------------
     # Load joined table
     # -------------------------
-    sdf, labels_available = join_table_inner(spark, pred_path=args.pred_file, label_path=args.label_file)
+    pred_sdf, labels_available = join_table_inner(spark, pred_path=args.pred_file, label_path=args.label_file)
 
     # -------------------------
     # Compute metrics
     # -------------------------
-    metrics = compute_metrics(sdf, labels_available)
+    metrics = compute_metrics(pred_sdf, labels_available)
 
     # -------------------------
     # Persist artifacts

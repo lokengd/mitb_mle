@@ -88,7 +88,8 @@ def main():
     # Prepare output directory
     # -------------------------
     # using model_name as subdir
-    out_dir = Path(args.out_dir) / args.model_name 
+    # out_dir = Path(args.out_dir) / args.model_name 
+    out_dir = Path(args.out_dir) 
     if not os.path.exists(out_dir):
         os.makedirs(out_dir)
 

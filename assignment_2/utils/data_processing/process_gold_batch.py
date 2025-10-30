@@ -9,7 +9,7 @@ from pyspark.sql import Row
 
 from data_processing import helper_functions as helper
 from data_processing.logger import get_spark_logger
-from data_processing.process_silver_full_batch import ANNUAL_INCOME_GROUP, LOAN_TYPES
+from data_processing.process_silver_batch import ANNUAL_INCOME_GROUP, LOAN_TYPES
 from scripts.config import DATAMART, FEATURE_STORE, LABEL_STORE, raw_config
 
 
@@ -99,7 +99,6 @@ def label_by_delinquency(spark, gold_dir, partition, labeling_rule, logger):
             print(f"An unexpected error occurred while reading the source file: {e}")
             logger.error(f"An unexpected error occurred while reading the source file: {e}")
 
-    
 def _process_attributes(spark, df, gold_dir, labeling_rule, partition_data, code_table_dir, logger):
     # [1] Feature store
     # select columns to save 
@@ -174,7 +173,9 @@ def _process_financials(spark, df, gold_dir, labeling_rule, partition_data, code
 
     # Save feature store
     # select columns to save
-    df_feature = df_feature.select("Customer_ID", "Annual_Income_Group", "delinquency_score_log", "savings_rate_avg_3m", "crs", "crs_version", "snapshot_date")
+    # df_feature = df_feature.select("Customer_ID", "Annual_Income_Group", "delinquency_score_log", "savings_rate_avg_3m", "crs", "crs_version", "snapshot_date")
+    # 2025-10-29: Add 3 more features for training: "dti", "Payment_Behavior_ID", "Payment_of_Min_Amount_ID"
+    df_feature = df_feature.select("Customer_ID", "Annual_Income_Group", "delinquency_score_log", "savings_rate_avg_3m", "crs", "dti", "Payment_Behavior_ID", "Payment_of_Min_Amount_ID", "snapshot_date")
     
     # save gold table - IRL connect to database to write
     filepath = gold_dir["feature_store_temp"] + partition_name.replace('silver','gold').replace('.csv','.parquet')      
@@ -182,7 +183,6 @@ def _process_financials(spark, df, gold_dir, labeling_rule, partition_data, code
 
     # [2] Label store    
     # Nil   
-
 
 def _process_clickstream(spark, df, gold_dir, labeling_rule, partition_data, code_table_dir, logger):
 
@@ -499,7 +499,7 @@ def main():
     
     # Delete _temp folder 
     helper.delete_folder(gold_dir["feature_store_temp"], logger)
-
+    
 
 if __name__ == "__main__":
     main()

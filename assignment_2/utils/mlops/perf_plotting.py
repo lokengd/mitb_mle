@@ -32,7 +32,7 @@ def plot_perf_metric(df, metric, out_dir, snapshot_date_str, period=None):
     plt.legend()
     plt.tight_layout()
 
-    out_path = os.path.join(out_dir, f"{metric}_timeseries_{snapshot_date_str}.png")
+    out_path = os.path.join(out_dir, f"{metric}_{snapshot_date_str}.png")
     plt.savefig(out_path)
     plt.close()
     print(f"Perf chart saved {out_path}")    
@@ -50,8 +50,8 @@ def main():
     # -------------------------
     # Prepare output directory
     # -------------------------
-    # using model_name as subdir
-    out_dir = Path(args.out_dir) / args.model_name 
+    # using snapshot_date as subdir
+    out_dir = Path(args.out_dir) / args.snapshot_date.replace('-','_') 
     if not os.path.exists(out_dir):
         os.makedirs(out_dir)
 
@@ -77,7 +77,7 @@ def main():
         
         metrics = ["auc", "logloss", "accuracy", "gini","n_rows"]
         for metric in metrics:
-            plot_perf_metric(perf_hist_sdf, metric, args.out_dir, snapshot_date_str=args.snapshot_date.replace('-','_'), period=args.period_tag)
+            plot_perf_metric(perf_hist_sdf, metric, out_dir, snapshot_date_str=args.snapshot_date.replace('-','_'), period=args.period_tag)
 
 if __name__ == "__main__":
     main()
