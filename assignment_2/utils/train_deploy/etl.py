@@ -1,12 +1,12 @@
 # config.py
 import os, glob
 from datetime import datetime, timedelta
+from dateutil.relativedelta import relativedelta
 from pyspark.sql.functions import col
 import pyspark.sql.functions as F
 from scripts.config import FEATURE_STORE, LABEL_STORE
 from sklearn.model_selection import train_test_split
 import json
-
 
 FEATURES_0 = ['Age_Group', 'Annual_Income_Group', 'savings_rate_avg_3m', 'crs', 'dti', 'Payment_Behavior_ID', 'Payment_of_Min_Amount_ID'] # financial dataset still 2025-01-01
 FEATURES_0_1 = FEATURES_0 + ['delinquency_score_log']
@@ -14,11 +14,15 @@ FEATURES_0_2 = FEATURES_0 + ['delinquency_flag'] # # NOTE surrogate_label (delin
 FEATURES_1_0 = FEATURES_0 + ['fe_1', 'fe_2', 'fe_3', 'fe_4', 'fe_5'] # clickstream dataset still 2024-12-01
 FEATURES_1_1 = FEATURES_0_1 + ['fe_1', 'fe_2', 'fe_3', 'fe_4', 'fe_5']
 FEATURES_1_2 = FEATURES_0_2 + ['fe_1', 'fe_2', 'fe_3', 'fe_4', 'fe_5']
-def get_default_feature_list():
-    return FEATURES_0_1 # Default
+
+FEATURES_SELECTION = FEATURES_1_1 # features selected for training
+LABEL_MONTH_SHIFT = 6 # default to shift 6 months for label to support logic mob=6
+
+def get_default_features():
+    return FEATURES_SELECTION # Default
 
 def select_features_str(features=None):
-    if not features: features = get_default_feature_list() 
+    if not features: features = get_default_features() 
     features_str = " ".join(features) # Convert list of strings to single string
     print("feature_str", features_str)
     return features_str 
@@ -128,35 +132,48 @@ def load_features_mob_0(spark, snapshot_date, features=[]):
     print(features_pdf.head(20))
     return features_pdf, feature_cols
 
-def load_dataset_mob_0(spark, start_date, end_date, features=[]):
+def load_dataset_mob_0(spark, start_date, end_date, features=[], labels_month_shift=0):
     # 1. Load labels & features
-    primary_labels_sdf = load_gold_primary_labels(spark, start_date, end_date)
-    surrogate_labels_sdf = load_gold_surrogate_labels(spark, start_date, end_date)
-    features_sdf = load_gold_features_date_range(spark, start_date, end_date)
+    label_start_date = start_date + relativedelta(months=labels_month_shift) # get labels 6 months later due to mob=6
+    label_end_date = end_date + relativedelta(months=labels_month_shift) # get labels 6 months later due to mob=6
+    print(f"load_dataset_mob_0 - Input snapshot_date: [{start_date}, {end_date}]")
+    print(f"load_dataset_mob_0 - Shift label snapshot_date by {labels_month_shift} months: [{label_start_date}, {label_end_date}]")
+
+    primary_labels_sdf = load_gold_primary_labels(spark, label_start_date, label_end_date) # label at T+6
+    surrogate_labels_sdf = load_gold_surrogate_labels(spark, start_date, end_date) # surrogate at T
+    features_sdf = load_gold_features_date_range(spark, start_date, end_date) # features at T
 
     # 2. normalize dates just in case
-    primary_labels_sdf = surrogate_labels_sdf.withColumn("snapshot_date", F.to_date("snapshot_date"))
+    primary_labels_sdf = primary_labels_sdf.withColumn("snapshot_date", F.to_date("snapshot_date"))
     surrogate_labels_sdf = surrogate_labels_sdf.withColumn("snapshot_date", F.to_date("snapshot_date"))
     features_sdf = features_sdf.withColumn("snapshot_date", F.to_date("snapshot_date"))
 
     # keep only MOB = 0 rows to avoid temporal leakage
     features_sdf = features_sdf.filter(F.col("mob") == 0)
 
-    # 3. Prepare dataset
-    base_sdf = primary_labels_sdf.join(features_sdf, on=["Customer_ID", "snapshot_date"], how="left")
-    # Extract surrogate label based on (delinquency_score_log > 10 & mob=0) as a feature
-    surrogate_label_as_a_feature_sdf = (
-        surrogate_labels_sdf
-        .select(
-            F.col("Customer_ID"),
-            F.col("snapshot_date"),
-            F.col("label").alias("delinquency_flag") # NOTE surrogate_label is accurate and using it as a feature hit AUC=1! it is identical to primary label
-        )
-    )
+    # 3. Shift feature dates to label-date key for primary_labels_sdf join
+    features_sdf_shift = features_sdf.withColumn("label_snapshot_date", F.add_months(F.col("snapshot_date"), labels_month_shift))
+
+    # 4. Join primary_labels_sdf labels on (Customer_ID, label_snapshot_date == primary.snapshot_date)
     dataset_sdf = (
-        base_sdf
-        .join(surrogate_label_as_a_feature_sdf, on=["Customer_ID", "snapshot_date"], how="left")
+        features_sdf_shift.join(
+            primary_labels_sdf.select("Customer_ID","snapshot_date","label")
+                .withColumnRenamed("snapshot_date","label_snapshot_date"),
+            on=["Customer_ID","label_snapshot_date"],
+            how="left"
+        )
+        # 5) Also join surrogate_labels_sdf at T:
+        .join(
+            surrogate_labels_sdf.select("Customer_ID","snapshot_date","label")
+                    .withColumnRenamed("label","delinquency_flag"),
+            on=["Customer_ID","snapshot_date"],
+            how="left"
+        )
+        # 6) Flags for missing labels
+        .withColumn("label_missing", F.when(F.col("label").isNull(), F.lit(1)).otherwise(F.lit(0)))
+        .withColumn("delinquency_missing",  F.when(F.col("delinquency_flag").isNull(), F.lit(1)).otherwise(F.lit(0)))
     )
+
     print("load_training_dataset_mob_0 dataset:")
     dataset_sdf.show(10, truncate=False)
     # show NULL counts per column

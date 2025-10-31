@@ -45,7 +45,7 @@ def psi_from_props(p: np.ndarray, q: np.ndarray, eps: float = 1e-10) -> float:
     q = np.clip(q, eps, 1.0)
     return float(np.sum((p - q) * np.log(p / q)))
 
-def psi_for_feature_over_time(ref_series, timeline: pd.DataFrame, month_col, feature_col, model_name, type) -> pd.DataFrame:
+def psi_for_feature_over_time(ref_series, timeline: pd.DataFrame, month_col, feature_col, model_name, type, snapshot_date) -> pd.DataFrame:
     """
     Compute PSI(feature) for each month in `timeline` which must have columns [month_col, feature_col].
     """
@@ -59,7 +59,7 @@ def psi_for_feature_over_time(ref_series, timeline: pd.DataFrame, month_col, fea
         out.append({
             "model_name": model_name,
             "type": type,
-            "snapshot_date": 'snapshot_date', 
+            "snapshot_date": snapshot_date, 
             "period_month": m, 
             "feature": feature_col, 
             "psi": psi, 
@@ -139,7 +139,8 @@ def main():
             month_col="__month__",
             feature_col=pred_col, 
             model_name=args.model_name,
-            type="PSI"
+            type="PSI",
+            snapshot_date=args.snapshot_date
         )
     # print("psi_df.shape", psi_df.shape)    
     # print(psi_df.info())  
@@ -162,7 +163,8 @@ def main():
             month_col="__month__",
             feature_col="value",
             model_name=args.model_name,
-            type="CSI"
+            type="CSI",
+            snapshot_date=args.snapshot_date
         )
         feature_csi["feature"] = feature
         csi_rows.append(feature_csi)
@@ -184,7 +186,7 @@ def main():
             hist_sdf = pd.concat([hist_sdf, new_df], ignore_index=True)
         else:
             hist_sdf = new_df.copy()
-        # keep last by (month, feature, type, model_name)
+        # keep last by (period_month, feature, type, model_name)
         hist_sdf = (hist_sdf.sort_values(["period_month"])).drop_duplicates(subset=["model_name", "type", "feature", "period_month"], keep="last")
         hist_sdf.to_parquet(hist_path, index=False)
         csv_path = hist_path.replace(".parquet", ".csv") # keep a CSV copy side-by-side for debugging 

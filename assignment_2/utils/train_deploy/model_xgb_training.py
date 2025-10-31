@@ -20,7 +20,7 @@ from sklearn.datasets import make_classification
 from sklearn.model_selection import train_test_split
 # import shap
     
-from train_deploy.etl import load_dataset_mob_0, load_training_dataset, parse_features, save_history_json
+from train_deploy.etl import load_dataset_mob_0, load_training_dataset, parse_features, save_history_json, LABEL_MONTH_SHIFT
 
 def main():
     parser = argparse.ArgumentParser()
@@ -75,7 +75,8 @@ def main():
     # Get training dataset
     # -------------------------
     features = parse_features(args.features) #Note args.featues is an array! 
-    dataset_pdf, features_sdf, feature_cols = load_dataset_mob_0(spark, config["train_test_start_date"], config["oot_end_date"], features)
+    labels_month_shift = LABEL_MONTH_SHIFT # get labels 6 months later due to mob=6
+    dataset_pdf, features_sdf, feature_cols = load_dataset_mob_0(spark, config["train_test_start_date"], config["oot_end_date"], features, labels_month_shift)
     X_train, X_test, X_oot, y_train, y_test, y_oot = load_training_dataset(dataset_pdf, feature_cols, config)
 
     # -------------------------

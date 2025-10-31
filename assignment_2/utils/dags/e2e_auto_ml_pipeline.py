@@ -13,7 +13,7 @@ from airflow.models.baseoperator import cross_downstream
 from airflow.operators.python import ShortCircuitOperator
 
 from scripts.config import FEATURE_STORE, LABEL_STORE, MODEL_BANK, DEPLOYMENT_DIR, PRED_STORE, MONITOR_STORE, RETRAINING_DIR, raw_data_file
-from train_deploy.etl import select_features_str, save_history_json
+from train_deploy.etl import select_features_str, save_history_json, LABEL_MONTH_SHIFT
 from mlops.thresholds import PERF_THRESHOLDS, STABILITY_THRESHOLDS
 
 def add_months(ds: str, months: int, fmt: str = "%Y_%m_%d"):
@@ -144,8 +144,9 @@ with DAG(
         "pred_store": PRED_STORE,
         "monitor_store": MONITOR_STORE,
         "retraining_dir": RETRAINING_DIR,
-        # features used for training
+        # features/labels used for training
         "features": select_features_str(),
+        "label_month_shift": LABEL_MONTH_SHIFT,
         # monitoring
         "perf_thresholds": PERF_THRESHOLDS,
         "psi_warn": STABILITY_THRESHOLDS["psi_warn"],
@@ -156,14 +157,14 @@ with DAG(
         "stability_history_path": f"{MONITOR_STORE}stability/stability_history.parquet",
         "retrain_deploy_dag_id": "retrain_deploy_pipeline",  # DAG that trains both models + selects + deploys
         # Controls the range of datasets for training/retraining
-        "ref_windows": ["2024_08_01", "2024_09_01"],   # 2 months OOT data as reference for monitoring
+        "ref_windows": ["2024_02_01", "2024_03_01"],   # 2 months OOT data as reference for monitoring
         "datasets": {
             "train_total_months": 14,
             "train_oot_months": 2,
-            "train_last_allowed": "2024-09-01",
-            "infer_start_allowed": "2024-10-01",
-            "monitor_start_allowed": "2024-10-01",
-            "retrain_last_allowed": "2024-11-01"
+            "train_last_allowed": "2024-03-01",
+            "infer_start_allowed": "2024-04-01",
+            "monitor_start_allowed": "2024-04-01",
+            "retrain_last_allowed": "2024-05-01"
         },
         "period_tag": None, # "TRAIN | TEST | OOT | PROD" or None
     },
@@ -499,10 +500,10 @@ with DAG(
                 )
 
                 # ----------------------------------------------------------
-                # 3. Performance monitoring (T+label_latency) sincd mob=6, needs to get labels at 6 months later
+                # 3. Performance monitoring 
                 # ----------------------------------------------------------
                 """
-                Primary labels mature at P+6M; Current ds = 2024-10-01, so ds + 6M = 2025-04-01    
+                    Primary labels mature at T+6M; Current T = 2024-10-01, so T + 6M = 2025-04-01    
                 """
                 perf_monitoring = BashOperator(
                     task_id=f"{model}_perf_monitoring",
@@ -512,7 +513,7 @@ with DAG(
                         --snapshot-date "{{{{ds}}}}" \
                         --model-name "{model}" \
                         --pred-file "{{{{params.pred_store}}}}{model}_predictions_{{{{ds | replace('-', '_')}}}}.parquet" \
-                        --label-file "{{{{ params.label_store }}}}primary/gold_lms_loan_daily_{{{{add_months(ds, 6)}}}}.parquet" \
+                        --label-file "{{{{ params.label_store }}}}primary/gold_lms_loan_daily_{{{{add_months(ds, params.label_month_shift)}}}}.parquet" \
                         --out-dir "{{{{params.monitor_store}}}}performance" \
                         --history-file "{{{{params.monitor_store}}}}performance/performance_history.parquet" \
                         --period-tag "PROD"
@@ -668,13 +669,12 @@ with DAG(
 
     with TaskGroup("retraining") as retraining:
         """
-        Sliding window of K months for dataset used for retraining. 
-        Last model trained with L_old, the new retrain uses L_new = L_old + k months. 
+        Sliding window of k months for dataset used for retraining. 
+        Last model trained with dataset_old, the new retrain uses dataset_new = dataset_old + k months. 
         That brings in k months of new labeled data and drops the oldest k months -> to address drift problem.
         """        
         models_retraining = []
         for model in dag.params["models"]: 
-
             retrain_model = BashOperator(
                 task_id=f"{model}_retraining",
                 bash_command=f"""

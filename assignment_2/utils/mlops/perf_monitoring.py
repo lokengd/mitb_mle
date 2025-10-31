@@ -10,6 +10,7 @@ from dateutil.relativedelta import relativedelta
 import pandas as pd
 import numpy as np
 from sklearn.metrics import roc_auc_score, log_loss, accuracy_score, precision_score, recall_score, f1_score, mean_absolute_error, mean_squared_error
+from train_deploy.etl import LABEL_MONTH_SHIFT
 
 def _compute_auc(y_true: np.ndarray, y_pred: np.ndarray):
     try:
@@ -114,8 +115,11 @@ def join_table_inner(spark, pred_path, label_path):
 
 def _append_to_history(history_path, model_name, snapshot_date_str, period_tag, scalars):
     """Append one row to a tidy Parquet history, creating it if missing."""
-    snapshot_date = datetime.strptime(snapshot_date_str, "%Y-%m-%d")
-    period_month = (snapshot_date - relativedelta(months=1)).strftime("%Y-%m") # minus 1 month. data in snapshot_date 2024-10-01 refers to Sep data
+    # Period months shows the actual calendar month. 
+    # For performance metrics, it is measured when label is available LABEL_MONTH_SHIFT later, where predictions were made at T month
+    # period_month =  T + LABEL_MONTH_SHIFT - 1 month e.g. data in snapshot_date 2024-10-01 refers to Sep data
+    snapshot_date = datetime.strptime(snapshot_date_str, "%Y-%m-%d") # predictions made at T month
+    period_month = (snapshot_date + relativedelta(months=LABEL_MONTH_SHIFT) - relativedelta(months=1)).strftime("%Y-%m") 
     row = {
         "model_name": model_name,
         "snapshot_date": snapshot_date_str,
