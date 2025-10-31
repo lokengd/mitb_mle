@@ -16,6 +16,13 @@ from scripts.config import FEATURE_STORE, LABEL_STORE, MODEL_BANK, DEPLOYMENT_DI
 from train_deploy.etl import select_features_str, save_history_json, LABEL_MONTH_SHIFT
 from mlops.thresholds import PERF_THRESHOLDS, STABILITY_THRESHOLDS
 
+
+#TODO train on 2024-03-01, needs label data 6 months later 2024-10-01
+# should be train on 2024-09-01, rollback train dataset six months ealier
+# from 2024-10-01 to 2025-01-01, only stability and perf metrics (assumed they are prod data, and lablel data 6 months already have it)
+# primary label only up to 2025-07-01
+# TODO when retrain and redeploy , need to redo predictions for reference_window dataset
+
 def add_months(ds: str, months: int, fmt: str = "%Y_%m_%d"):
     # ds is "YYYY-MM-DD"
     return pendulum.parse(ds).add(months=months).strftime(fmt)
@@ -157,7 +164,6 @@ with DAG(
         "stability_history_path": f"{MONITOR_STORE}stability/stability_history.parquet",
         "retrain_deploy_dag_id": "retrain_deploy_pipeline",  # DAG that trains both models + selects + deploys
         # Controls the range of datasets for training/retraining
-        "ref_windows": ["2024_02_01", "2024_03_01"],   # 2 months OOT data as reference for monitoring
         "datasets": {
             "train_total_months": 14,
             "train_oot_months": 2,
@@ -367,7 +373,7 @@ with DAG(
                 check_candidate = FileSensor(
                     task_id=f"{model}_candidate",
                     fs_conn_id="fs_default",
-                    filepath=f"""{{{{params.model_bank}}}}/{model}_{{{{ds | replace('-', '_')}}}}.pkl""".strip(),
+                    filepath=f"""{{{{params.model_bank}}}}{model}_{{{{ds | replace('-', '_')}}}}.pkl""".strip(),
                     poke_interval=60,
                     timeout=60 * 60,
                     mode="reschedule",
@@ -395,7 +401,7 @@ with DAG(
                 python /opt/airflow/scripts/train_deploy/best_model_deployment.py \
                 --best-model-json {{{{params.model_bank}}}}/best_model_{{{{ds | replace('-', '_')}}}}.json \
                 --deployment-dir {{{{params.deployment_dir}}}} \
-                --out-file {{{{params.deployment_dir}}}}deployment_{{{{ds | replace('-', '_')}}}}.json \
+                --out-file {{{{params.deployment_dir}}}}deployment_history.json \
                 --alias prod_model.pkl
             """.strip(),
             execution_timeout=timedelta(hours=1),
@@ -443,6 +449,7 @@ with DAG(
                 --snapshot-date "{{{{ds}}}}" \
                 --model-name "{{{{params.prod_model_name}}}}" \
                 --deployment-dir "{{{{params.deployment_dir}}}}" \
+                --deployment-history "{{{{params.deployment_dir}}}}deployment_history.json" \
                 --out-dir "{{{{params.pred_store}}}}" \
                 --features {{{{params.features}}}} \
                 --start-allowed "{{{{params.datasets.infer_start_allowed}}}}" \
@@ -481,6 +488,7 @@ with DAG(
 
                 # ----------------------------------------------------------
                 # 2. Stability monitoring - no labels: PSI/CSI (features & scores), drift alerts
+                # Reference features and predictions are retrieved from deployment_history.json
                 # ----------------------------------------------------------
                 stability_monitoring = BashOperator(
                     task_id=f"{model}_stability_monitoring",
@@ -488,12 +496,13 @@ with DAG(
                         python /opt/airflow/scripts/mlops/stability_monitoring.py \
                         --snapshot-date "{{{{ds}}}}" \
                         --model-name "{model}" \
-                        --ref-features {{{{params.feature_store}}}}gold_features_{{{{params.ref_windows[0]}}}}.parquet {{{{params.feature_store}}}}gold_features_{{{{params.ref_windows[1]}}}}.parquet \
-                        --cur-features {{{{params.feature_store}}}}gold_features_{{{{ds | replace('-', '_')}}}}.parquet \
                         --features {{{{params.csi_features}}}} \
-                        --ref-pred {{{{params.pred_store}}}}{model}_predictions_{{{{params.ref_windows[0]}}}}.parquet {{{{params.pred_store}}}}{model}_predictions_{{{{params.ref_windows[1]}}}}.parquet \
+                        --cur-features {{{{params.feature_store}}}}gold_features_{{{{ds | replace('-', '_')}}}}.parquet \
                         --cur-pred {{{{params.pred_store}}}}{model}_predictions_{{{{ds | replace('-', '_')}}}}.parquet \
                         --pred-col model_predictions \
+                        --deployment-history "{{{{params.deployment_dir}}}}deployment_history.json" \
+                        --feature-store {{{{params.feature_store}}}} \
+                        --pred-store {{{{params.pred_store}}}} \
                         --out-dir {{{{params.monitor_store}}}}stability \
                         """.strip(), 
                     execution_timeout=timedelta(hours=1),

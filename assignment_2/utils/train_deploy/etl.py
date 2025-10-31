@@ -8,6 +8,11 @@ from scripts.config import FEATURE_STORE, LABEL_STORE
 from sklearn.model_selection import train_test_split
 import json
 
+
+TRAIN_TEST_PERIOD_MONTHS = 12
+OOT_PERIOD_MONTHS = 2
+TRAIN_TEST_RATIO = 0.8
+
 FEATURES_0 = ['Age_Group', 'Annual_Income_Group', 'savings_rate_avg_3m', 'crs', 'dti', 'Payment_Behavior_ID', 'Payment_of_Min_Amount_ID'] # financial dataset still 2025-01-01
 FEATURES_0_1 = FEATURES_0 + ['delinquency_score_log']
 FEATURES_0_2 = FEATURES_0 + ['delinquency_flag'] # # NOTE surrogate_label (delinquency_flag) is accurate and using it as a feature hit AUC=1! it is identical to primary label
@@ -212,7 +217,6 @@ def replace_NaN_column_with_0(dataset_pdf, feature_cols):
             dataset_pdf[col] = dataset_pdf[col].fillna(0)
             print(f"NaN {col} count after fill:", dataset_pdf[col].isna().sum()) # Verify
     return dataset_pdf
-
 
 def save_history_json(record, out_file):
     # Load existing history (if file exists)

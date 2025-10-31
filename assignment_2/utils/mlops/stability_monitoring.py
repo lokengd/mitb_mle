@@ -1,4 +1,4 @@
-import argparse, json, os
+import argparse, json, os, sys
 from pathlib import Path
 
 import numpy as np
@@ -25,6 +25,7 @@ def _ensure_bins_from_reference(ref: pd.Series, nbins: int = 10) -> np.ndarray:
         if vmin == vmax:
             vmin, vmax = vmin - 1e-9, vmax + 1e-9
         edges = np.linspace(vmin, vmax, nbins + 1)
+    print("_ensure_bins_from_reference edges", edges)
     return edges
 
 def _proportions_in_bins(values: pd.Series, edges: np.ndarray) -> np.ndarray:
@@ -34,7 +35,9 @@ def _proportions_in_bins(values: pd.Series, edges: np.ndarray) -> np.ndarray:
     counts = cats.value_counts(sort=False)
     if counts.sum() == 0:
         return np.zeros(len(counts))
-    return (counts / counts.sum()).values
+    proportions = (counts / counts.sum()).values
+    print("proportion in each bin", proportions)
+    return proportions
 
 def psi_from_props(p: np.ndarray, q: np.ndarray, eps: float = 1e-10) -> float:
     """
@@ -49,11 +52,14 @@ def psi_for_feature_over_time(ref_series, timeline: pd.DataFrame, month_col, fea
     """
     Compute PSI(feature) for each month in `timeline` which must have columns [month_col, feature_col].
     """
+    print("=========================")
     edges = _ensure_bins_from_reference(ref_series, nbins=10) # nbins = 10 default
     ref_props = _proportions_in_bins(ref_series, edges)
 
     out = []
     for m, g in timeline.groupby(month_col, sort=True):
+        print("-----------------------")
+        print(f"Computing {type} for {feature_col} {m}", g[feature_col])
         comp_props = _proportions_in_bins(g[feature_col], edges)
         psi = psi_from_props(comp_props, ref_props)
         out.append({
@@ -69,7 +75,7 @@ def psi_for_feature_over_time(ref_series, timeline: pd.DataFrame, month_col, fea
 
 def build_period_month_str(dt: pd.Series) -> pd.Series:
     """
-    Return YYYY-MM for the month BEFORE each date in `dt`.
+    Return YYYY-MM for the month BEFORE each date in dt.
     """
     s = pd.to_datetime(dt)                    # ensure datetime64[ns]
     s = s - pd.DateOffset(months=1)           # shift back 1 month
@@ -79,12 +85,15 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--snapshot-date", required=True, type=str)
     parser.add_argument("--model-name", required=True, type=str)
-    parser.add_argument("--ref-features", required=True, nargs="+", help="Paths to reference datasets, e.g. --ref-features ref1.parquet ref2.parquet")
+    # parser.add_argument("--ref-features", required=True, nargs="+", help="Paths to reference datasets, e.g. --ref-features ref1.parquet ref2.parquet")
     parser.add_argument("--cur-features", required=True, help="Current month file (csv/parquet).")
     parser.add_argument("--features", required=True, nargs="+", help="Feature columns to compute PSI for, e.g. --features fe_1 fe_2 fe_3")
-    parser.add_argument("--ref-pred", required=True, nargs="+", help="Paths to prediction datasets, e.g. --ref-scores ref1.parquet ref2.parquet")
+    # parser.add_argument("--ref-pred", required=True, nargs="+", help="Paths to prediction datasets, e.g. --ref-scores ref1.parquet ref2.parquet")
     parser.add_argument("--cur-pred", required=True, help="Current month file (csv/parquet).")
     parser.add_argument("--pred-col", required=True, default="model_predictions", help="column storing model predictions based on output of batch_inference.py")
+    parser.add_argument("--deployment-history", required=True)
+    parser.add_argument("--feature-store", required=True)
+    parser.add_argument("--pred-store", required=True)
     parser.add_argument("--out-dir", required=True, help="Output directory")
     args = parser.parse_args()
     print("Arguments:", args)
@@ -97,6 +106,32 @@ def main():
     out_dir = Path(args.out_dir) 
     if not os.path.exists(out_dir):
         os.makedirs(out_dir)
+
+    # -------------------------
+    # Deployment history validations
+    # -------------------------
+    if not os.path.exists(args.deployment_history):
+        print(f"Missing deployment_history.json: {args.deployment_history}", file=sys.stderr)
+        sys.exit(1)
+    with open(args.deployment_history, "r", encoding="utf-8") as f:
+        deployment_history = json.load(f)
+
+    deployed_model = deployment_history[0] # always take the latest deployment_history[0] at position 0 (already sorted)
+    reference_months = deployed_model.get("reference_months") 
+    if not reference_months or len(reference_months)==0:
+        print(f"Reference months not found or empty: {reference_months}", file=sys.stderr)
+        sys.exit(2)
+
+    # locate reference features and predictions files
+    ref_pred_path = []
+    ref_features_path = []
+    ref_filename_prefix = 'predictions_reference'
+    for ref_date in reference_months:
+        ref_pred_path.append(os.path.join(args.pred_store, f"{args.model_name}_{ref_filename_prefix}_{ref_date.replace('-','_')}.parquet"))
+        ref_features_path.append(os.path.join(args.feature_store, f"gold_features_{ref_date.replace('-','_')}.parquet"))
+
+    print(f"Reference preds:", ref_pred_path)
+    print(f"Reference features:", ref_features_path)
 
     # -------------------------
     # Initialize SparkSession
@@ -120,9 +155,9 @@ def main():
         cur = _read_table(Path(current)).copy()
         return ref, cur
     
-    ref_pred, cur_pred = load_ref_current_dataset(args.ref_pred, args.cur_pred)
+    ref_pred, cur_pred = load_ref_current_dataset(ref_pred_path, args.cur_pred)
     cur_pred["__month__"] = build_period_month_str(cur_pred["snapshot_date"]) # Derive month key for current (used in outputs) (YYYY_MM) 
-    ref_features, cur_features = load_ref_current_dataset(args.ref_features, args.cur_features)
+    ref_features, cur_features = load_ref_current_dataset(ref_features_path, args.cur_features)
     cur_features["__month__"] = build_period_month_str(cur_features["snapshot_date"]) # Derive month key for current (used in outputs) (YYYY_MM) 
     
     # -------------------------
@@ -180,7 +215,6 @@ def main():
     # Persist artifacts (across time periods)
     # -------------------------
     def append_history(hist_path, new_df: pd.DataFrame):
-        print(f"append_history... {hist_path}")
         if os.path.exists(hist_path):
             hist_sdf = pd.read_parquet(hist_path)
             hist_sdf = pd.concat([hist_sdf, new_df], ignore_index=True)

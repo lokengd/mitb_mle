@@ -30,7 +30,14 @@ def main():
     #     candidates.append(pkl)
     # print("Model candidates: {candidates}")
 
-    # compare the most recent 6 models per candidate
+    """
+    Model selection policy
+    1.	Scanning the whole model_bank and take the most recent k months models
+	2.	Reading every *.pkl that matches candidate prefixes (model_xgb, model_lr)
+	3.	Taking the highest auc_oot ever
+	4.	Writing best_model_2024_07_01.json (or whatever snapshot)
+	5.	Then copies that model to deployment/prod_model.pkl
+    """
     def _extract_date_from_filename(fname: str):
         # expecting like: model_xgb_2024_09_01.pkl
         m = re.search(r"_(\d{4}_\d{2}_\d{2})\.pkl$", fname)
@@ -38,6 +45,7 @@ def main():
             return m.group(1)
         return None
 
+    top_k = 3 # look back 3 months or take the most recent 3 months (if there are model deployed every month)
     candidates = []
     for model in args.model_candidates:
         all_pkls = [
@@ -51,12 +59,11 @@ def main():
             key=lambda f: _extract_date_from_filename(os.path.basename(f)),
             reverse=True,
         )
-        # take top 6
-        recent = all_pkls[:6]
+        # take top k
+        recent = all_pkls[:top_k]
         candidates.extend(recent)
 
     print("Model candidates:", candidates)    
-
 
     # -------------------------
     # Select best model

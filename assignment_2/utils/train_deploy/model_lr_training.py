@@ -18,7 +18,7 @@ from sklearn.metrics import make_scorer, roc_auc_score
 from sklearn.linear_model import LogisticRegression
 # import shap
 
-from train_deploy.etl import load_dataset_mob_0, load_training_dataset, replace_NaN_column_with_0, parse_features, save_history_json, LABEL_MONTH_SHIFT
+from train_deploy.etl import load_dataset_mob_0, load_training_dataset, replace_NaN_column_with_0, parse_features, save_history_json, LABEL_MONTH_SHIFT, TRAIN_TEST_PERIOD_MONTHS, OOT_PERIOD_MONTHS, TRAIN_TEST_RATIO
 
 def main():
     parser = argparse.ArgumentParser()
@@ -47,9 +47,9 @@ def main():
     # Windows config
     # -------------------------
     model_train_date_str = args.snapshot_date
-    train_test_period_months = 12
-    oot_period_months = 2
-    train_test_ratio = 0.8
+    train_test_period_months = TRAIN_TEST_PERIOD_MONTHS
+    oot_period_months = OOT_PERIOD_MONTHS
+    train_test_ratio = TRAIN_TEST_RATIO
 
     config = {
         "model_train_date_str": model_train_date_str,
